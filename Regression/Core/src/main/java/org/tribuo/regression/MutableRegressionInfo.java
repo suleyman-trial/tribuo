@@ -33,6 +33,10 @@ public class MutableRegressionInfo extends RegressionInfo implements MutableOutp
         super();
     }
 
+    /**
+     * Constructs a mutable copy of the supplied regression info.
+     * @param info The info to copy.
+     */
     public MutableRegressionInfo(RegressionInfo info) {
         super(info);
     }
@@ -97,7 +101,7 @@ public class MutableRegressionInfo extends RegressionInfo implements MutableOutp
     @Override
     public String toString() {
         StringBuilder builder = new StringBuilder();
-        builder.append("MultipleRegressionOutput(");
+        builder.append("RegressionInfo(");
         for (Map.Entry<String,MutableLong> e : countMap.entrySet()) {
             String name = e.getKey();
             long count = e.getValue().longValue();

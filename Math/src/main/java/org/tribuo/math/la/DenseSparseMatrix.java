@@ -42,16 +42,34 @@ public class DenseSparseMatrix implements Matrix {
         this.shape = new int[]{dim1,dim2};
     }
 
+    /***
+     * Constructs a DenseSparseMatrix out of the supplied sparse vector list.
+     * <p>
+     * Throws IllegalArgumentException if the list forms a ragged matrix.
+     * <p>
+     * Does not copy the vectors, it directly wraps them.
+     * @param values The SparseVectors.
+     */
     public DenseSparseMatrix(List<SparseVector> values) {
         this.values = new SparseVector[values.size()];
         this.dim1 = values.size();
         this.dim2 = values.get(0).size();
         this.shape = new int[]{dim1,dim2};
         for (int i = 0; i < values.size(); i++) {
+            if (values.get(i).size() != dim2) {
+                throw new IllegalArgumentException("Unexpected size, found " + values.get(i).size() + ", expected " + dim2);
+            }
             this.values[i] = values.get(i);
+            if (values.get(i).size() != this.dim2) {
+                throw new IllegalArgumentException("Vectors are not the same dimension, expected " + dim2 + ", found " + values.get(i).size() + " at index " + i);
+            }
         }
     }
 
+    /**
+     * Creates a new DenseSparseMatrix by deep copying the supplied DenseSparseMatrix.
+     * @param other The matrix to copy.
+     */
     public DenseSparseMatrix(DenseSparseMatrix other) {
         this.dim1 = other.dim1;
         this.dim2 = other.dim2;
@@ -59,6 +77,24 @@ public class DenseSparseMatrix implements Matrix {
         this.shape = new int[]{dim1,dim2};
         for (int i = 0; i < values.length; i++) {
             values[i] = other.values[i].copy();
+        }
+    }
+
+    /**
+     * Creates a DenseSparseMatrix with no values or indices.
+     * <p>
+     * Used as a placeholder in the gradient system.
+     * @param dim1 The first dimension.
+     * @param dim2 The second dimension.
+     */
+    public DenseSparseMatrix(int dim1, int dim2) {
+        this.dim1 = dim1;
+        this.dim2 = dim2;
+        this.values = new SparseVector[dim1];
+        this.shape = new int[]{dim1,dim2};
+        SparseVector emptyVector = new SparseVector(dim2);
+        for (int i = 0; i < values.length; i++) {
+            values[i] = emptyVector;
         }
     }
 
@@ -83,6 +119,17 @@ public class DenseSparseMatrix implements Matrix {
     @Override
     public Tensor reshape(int[] newShape) {
         throw new UnsupportedOperationException("Reshape not supported on sparse Tensors.");
+    }
+
+    @Override
+    public DenseSparseMatrix copy() {
+        SparseVector[] copies = new SparseVector[values.length];
+
+        for (int i = 0; i < values.length; i++) {
+            copies[i] = values[i].copy();
+        }
+
+        return new DenseSparseMatrix(copies);
     }
 
     @Override

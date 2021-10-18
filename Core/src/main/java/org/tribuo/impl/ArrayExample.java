@@ -48,12 +48,24 @@ public class ArrayExample<T extends Output<T>> extends Example<T> {
 
     private static final Logger logger = Logger.getLogger(ArrayExample.class.getName());
 
+    /**
+     * Default initial size of the backing arrays.
+     */
     public static final int DEFAULT_SIZE = 10;
 
+    /**
+     * Feature names array.
+     */
     protected String[] featureNames;
 
+    /**
+     * Feature values array.
+     */
     protected double[] featureValues;
 
+    /**
+     * Number of valid features in this example.
+     */
     protected int size = 0;
 
     /**
@@ -416,7 +428,7 @@ public class ArrayExample<T extends Output<T>> extends Example<T> {
 
     @Override
     public void transform(TransformerMap transformerMap) {
-        if(transformerMap.size() < featureNames.length) {
+        if(transformerMap.size() < size) {
             //
             // We have fewer transformers than feature names, so let's
             // iterate through the map and find the features.

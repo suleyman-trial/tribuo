@@ -29,6 +29,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.function.DoubleBinaryOperator;
 import java.util.function.DoubleUnaryOperator;
+import java.util.function.ToDoubleBiFunction;
 
 /**
  * A dense vector, backed by a double array.
@@ -39,10 +40,19 @@ public class DenseVector implements SGDVector {
     private final int[] shape;
     protected final double[] elements;
 
+    /**
+     * Creates an empty dense vector of the specified size.
+     * @param size The vector size.
+     */
     public DenseVector(int size) {
         this(size,0.0);
     }
 
+    /**
+     * Creates a dense vector of the specified size where each element is initialised to the specified value.
+     * @param size The vector size.
+     * @param value The initial value.
+     */
     public DenseVector(int size, double value) {
         this.elements = new double[size];
         Arrays.fill(this.elements,value);
@@ -121,6 +131,7 @@ public class DenseVector implements SGDVector {
      * get function has been modified.
      * @return A copy of the values in this DenseVector.
      */
+    @Override
     public double[] toArray() {
         return Arrays.copyOf(elements, elements.length);
     }
@@ -313,6 +324,13 @@ public class DenseVector implements SGDVector {
     }
 
     @Override
+    public void foreachIndexedInPlace(ToDoubleBiFunction<Integer,Double> f) {
+        for (int i = 0; i < elements.length; i++) {
+            elements[i] = f.applyAsDouble(i,elements[i]);
+        }
+    }
+
+    @Override
     public DenseVector scale(double coefficient) {
         DenseVector output = copy();
         output.scaleInPlace(coefficient);
@@ -376,6 +394,11 @@ public class DenseVector implements SGDVector {
         return sum;
     }
 
+    /**
+     * Sums this vector, applying the supplied function to each element first.
+     * @param f The function to apply to the elements.
+     * @return The sum of f(x).
+     */
     public double sum(DoubleUnaryOperator f) {
         double sum = 0.0;
         for (int i = 0; i < elements.length; i++) {

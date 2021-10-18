@@ -25,6 +25,7 @@ import org.tribuo.Trainer;
 import org.tribuo.common.liblinear.LibLinearModel;
 import org.tribuo.common.liblinear.LibLinearTrainer;
 import org.tribuo.provenance.ModelProvenance;
+import org.tribuo.regression.ImmutableRegressionInfo;
 import org.tribuo.regression.Regressor;
 import org.tribuo.regression.liblinear.LinearRegressionType.LinearType;
 import de.bwaldvogel.liblinear.FeatureNode;
@@ -41,6 +42,10 @@ import java.util.logging.Logger;
  * A {@link Trainer} which wraps a liblinear-java regression trainer.
  * <p>
  * This generates an independent liblinear model for each regression dimension.
+ * <p>
+ * Note the train method is synchronized on {@code LibLinearTrainer.class} due to a global RNG in liblinear-java.
+ * This is insufficient to ensure reproducibility if liblinear-java is used directly in the same JVM as Tribuo, but
+ * avoids locking on classes Tribuo does not control.
  * <p>
  * See:
  * <pre>
@@ -66,12 +71,18 @@ public class LibLinearRegressionTrainer extends LibLinearTrainer<Regressor> {
         this(new LinearRegressionType(LinearType.L2R_L2LOSS_SVR));
     }
 
+    /**
+     * Creates a trainer for a LibLinear regression model.
+     * <p>
+     * Uses the default values of cost = 1.0, maxIterations = 1000, terminationCriterion = 0.1, epsilon = 0.1.
+     * @param trainerType Loss function and optimisation method.
+     */
     public LibLinearRegressionTrainer(LinearRegressionType trainerType) {
         this(trainerType,1.0,1000,0.1,0.1);
     }
 
     /**
-     * Creates a trainer for a LibLinear model
+     * Creates a trainer for a LibLinear regression model.
      * @param trainerType Loss function and optimisation method combination.
      * @param cost Cost penalty for each incorrectly classified training point.
      * @param maxIterations The maximum number of dataset iterations.
@@ -88,7 +99,7 @@ public class LibLinearRegressionTrainer extends LibLinearTrainer<Regressor> {
     @Override
     public void postConfig() {
         super.postConfig();
-        if (!trainerType.isClassification()) {
+        if (!trainerType.isRegression()) {
             throw new IllegalArgumentException("Supplied classification or anomaly detection parameters to a regression linear model.");
         }
     }
@@ -106,6 +117,9 @@ public class LibLinearRegressionTrainer extends LibLinearTrainer<Regressor> {
             data.n = numFeatures;
             data.bias = 1.0;
 
+            // Note this isn't sufficient for reproducibility as it doesn't cope with concurrency.
+            // Concurrency safety is handled by the global lock on LibLinearTrainer.class in LibLinearTrainer.train.
+            Linear.resetRandom();
             models.add(Linear.train(data, curParams));
         }
 
@@ -123,14 +137,15 @@ public class LibLinearRegressionTrainer extends LibLinearTrainer<Regressor> {
     @Override
     protected Pair<FeatureNode[][], double[][]> extractData(Dataset<Regressor> data, ImmutableOutputInfo<Regressor> outputInfo, ImmutableFeatureMap featureMap) {
         int numOutputs = outputInfo.size();
-        ArrayList<FeatureNode> featureCache = new ArrayList<>();
+        int[] dimensionIds = ((ImmutableRegressionInfo) outputInfo).getNaturalOrderToIDMapping();
+        List<FeatureNode> featureCache = new ArrayList<>();
         FeatureNode[][] features = new FeatureNode[data.size()][];
         double[][] outputs = new double[numOutputs][data.size()];
         int i = 0;
         for (Example<Regressor> e : data) {
             double[] curOutputs = e.getOutput().getValues();
             for (int j = 0; j < curOutputs.length; j++) {
-                outputs[j][i] = curOutputs[j];
+                outputs[dimensionIds[j]][i] = curOutputs[j];
             }
             features[i] = exampleToNodes(e,featureMap,featureCache);
             i++;

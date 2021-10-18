@@ -28,6 +28,7 @@ import org.tribuo.common.tree.SplitNode;
 import org.tribuo.common.tree.impl.IntArrayContainer;
 import org.tribuo.math.la.SparseVector;
 import org.tribuo.math.la.VectorTuple;
+import org.tribuo.regression.ImmutableRegressionInfo;
 import org.tribuo.regression.Regressor;
 import org.tribuo.regression.Regressor.DimensionTuple;
 import org.tribuo.regression.rtree.impurity.RegressorImpurity;
@@ -54,9 +55,6 @@ public class RegressorTrainingNode extends AbstractTrainingNode<Regressor> {
 
     private static final ThreadLocal<IntArrayContainer> mergeBufferOne = ThreadLocal.withInitial(() -> new IntArrayContainer(DEFAULT_SIZE));
     private static final ThreadLocal<IntArrayContainer> mergeBufferTwo = ThreadLocal.withInitial(() -> new IntArrayContainer(DEFAULT_SIZE));
-    private static final ThreadLocal<IntArrayContainer> mergeBufferThree = ThreadLocal.withInitial(() -> new IntArrayContainer(DEFAULT_SIZE));
-    private static final ThreadLocal<IntArrayContainer> mergeBufferFour = ThreadLocal.withInitial(() -> new IntArrayContainer(DEFAULT_SIZE));
-    private static final ThreadLocal<IntArrayContainer> mergeBufferFive = ThreadLocal.withInitial(() -> new IntArrayContainer(DEFAULT_SIZE));
 
     private transient ArrayList<TreeFeature> data;
 
@@ -76,6 +74,17 @@ public class RegressorTrainingNode extends AbstractTrainingNode<Regressor> {
 
     private final float weightSum;
 
+    /**
+     * Constructs a tree training node for regression problems.
+     * @param impurity The impurity function.
+     * @param tuple The data tuple.
+     * @param dimIndex The output dimension index of this node.
+     * @param dimName The output dimension name.
+     * @param numExamples The number of examples.
+     * @param featureIDMap The feature domain.
+     * @param outputInfo The output domain.
+     * @param leafDeterminer The leaf determination parameters.
+     */
     public RegressorTrainingNode(RegressorImpurity impurity, InvertedData tuple, int dimIndex, String dimName,
                                  int numExamples, ImmutableFeatureMap featureIDMap,
                                  ImmutableOutputInfo<Regressor> outputInfo, LeafDeterminer leafDeterminer) {
@@ -397,13 +406,14 @@ public class RegressorTrainingNode extends AbstractTrainingNode<Regressor> {
             data.add(new TreeFeature(i));
         }
 
+        int[] ids = ((ImmutableRegressionInfo) labelInfo).getNaturalOrderToIDMapping();
         for (int i = 0; i < examples.size(); i++) {
             Example<Regressor> e = examples.getExample(i);
             indices[i] = i;
             weights[i] = e.getWeight();
             double[] output = e.getOutput().getValues();
             for (int j = 0; j < output.length; j++) {
-                targets[j][i] = (float) output[j];
+                targets[ids[j]][i] = (float) output[j];
             }
             SparseVector vec = SparseVector.createSparseVector(e,featureInfos,false);
             int lastID = 0;

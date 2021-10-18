@@ -56,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public class TestSGDLinear {
+    private static final Logger logger = Logger.getLogger(TestSGDLinear.class.getName());
 
     private static final LinearSGDTrainer hinge = new LinearSGDTrainer(new Hinge(),new AdaGrad(0.1,0.1),5,1000, Trainer.DEFAULT_SEED);
     private static final LinearSGDTrainer sigmoid = new LinearSGDTrainer(new BinaryCrossEntropy(),new AdaGrad(0.1,0.1),5,1000, Trainer.DEFAULT_SEED);
@@ -63,7 +64,7 @@ public class TestSGDLinear {
     @BeforeAll
     public static void setup() {
         Class<?>[] classes = new Class<?>[]{AbstractSGDTrainer.class, AbstractLinearSGDTrainer.class,LinearSGDTrainer.class};
-        for (Class c : classes) {
+        for (Class<?> c : classes) {
             Logger logger = Logger.getLogger(c.getName());
             logger.setLevel(Level.WARNING);
         }
@@ -91,14 +92,11 @@ public class TestSGDLinear {
 
         MultiLabelEvaluation evaluation = (MultiLabelEvaluation) train.getOutputFactory().getEvaluator().evaluate(model,test);
 
-        if (trainer == hinge) {
-            Assertions.assertEquals(0.6, evaluation.microAveragedRecall());
-        } else {
-            Assertions.assertEquals(1.0, evaluation.microAveragedRecall());
-        }
+        Assertions.assertEquals(1.0, evaluation.microAveragedRecall());
 
         Helpers.testModelSerialization(model, MultiLabel.class);
     }
+
     @Test
     public void testOnnxSerialization() throws IOException, OrtException {
         Dataset<MultiLabel> train = MultiLabelDataGenerator.generateTrainData();
@@ -107,7 +105,7 @@ public class TestSGDLinear {
 
         // Write out model
         Path onnxFile = Files.createTempFile("tribuo-sgd-test",".onnx");
-        model.saveONNXModel("org.tribuo.classification.sgd.linear.test",1,onnxFile);
+        model.saveONNXModel("org.tribuo.multilabel.sgd.linear.test",1,onnxFile);
 
         // Prep mappings
         Map<String, Integer> featureMapping = new HashMap<>();
@@ -120,31 +118,38 @@ public class TestSGDLinear {
             outputMapping.put(l.getB(), l.getA());
         }
 
-        // Load in via ORT
-        OrtEnvironment env = OrtEnvironment.getEnvironment();
-        env.close();
-        ONNXExternalModel<MultiLabel> onnxModel = ONNXExternalModel.createOnnxModel(new MultiLabelFactory(),featureMapping,outputMapping,new DenseTransformer(),new MultiLabelTransformer(),new OrtSession.SessionOptions(),onnxFile,"input");
+        String arch = System.getProperty("os.arch");
+        if (arch.equalsIgnoreCase("amd64") || arch.equalsIgnoreCase("x86_64")) {
+            // Initialise the OrtEnvironment to load the native library
+            // (as OrtSession.SessionOptions doesn't trigger the static initializer).
+            OrtEnvironment env = OrtEnvironment.getEnvironment();
+            env.close();
+            // Load in via ORT
+            ONNXExternalModel<MultiLabel> onnxModel = ONNXExternalModel.createOnnxModel(new MultiLabelFactory(),featureMapping,outputMapping,new DenseTransformer(),new MultiLabelTransformer(),new OrtSession.SessionOptions(),onnxFile,"input");
 
-        // Generate predictions
-        List<Prediction<MultiLabel>> nativePredictions = model.predict(test);
-        List<Prediction<MultiLabel>> onnxPredictions = onnxModel.predict(test);
+            // Generate predictions
+            List<Prediction<MultiLabel>> nativePredictions = model.predict(test);
+            List<Prediction<MultiLabel>> onnxPredictions = onnxModel.predict(test);
 
-        // Assert the predictions are identical
-        for (int i = 0; i < nativePredictions.size(); i++) {
-            Prediction<MultiLabel> tribuo = nativePredictions.get(i);
-            Prediction<MultiLabel> external = onnxPredictions.get(i);
-            assertEquals(tribuo.getOutput().getLabelSet(), external.getOutput().getLabelSet());
-            for (Map.Entry<String,MultiLabel> l : tribuo.getOutputScores().entrySet()) {
-                MultiLabel other = external.getOutputScores().get(l.getKey());
-                if (other == null) {
-                    fail("Failed to find label " + l.getKey() + " in ORT prediction.");
-                } else {
-                    assertEquals(l.getValue().getScore(),other.getScore(),1e-6);
+            // Assert the predictions are identical
+            for (int i = 0; i < nativePredictions.size(); i++) {
+                Prediction<MultiLabel> tribuo = nativePredictions.get(i);
+                Prediction<MultiLabel> external = onnxPredictions.get(i);
+                assertEquals(tribuo.getOutput().getLabelSet(), external.getOutput().getLabelSet());
+                for (Map.Entry<String,MultiLabel> l : tribuo.getOutputScores().entrySet()) {
+                    MultiLabel other = external.getOutputScores().get(l.getKey());
+                    if (other == null) {
+                        fail("Failed to find label " + l.getKey() + " in ORT prediction.");
+                    } else {
+                        assertEquals(l.getValue().getScore(),other.getScore(),1e-6);
+                    }
                 }
             }
-        }
 
-        onnxModel.close();
+            onnxModel.close();
+        } else {
+            logger.warning("ORT based tests only supported on x86_64, found " + arch);
+        }
 
         onnxFile.toFile().delete();
     }
