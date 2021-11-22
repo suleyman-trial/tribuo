@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import org.tribuo.provenance.impl.TrainerProvenanceImpl;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Map;
 import java.util.SplittableRandom;
 import java.util.logging.Logger;
@@ -134,11 +135,24 @@ public class BaggingTrainer<T extends Output<T>> implements Trainer<T> {
     }
     
     @Override
-    public Model<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance) {
+    public EnsembleModel<T> train(Dataset<T> examples) {
+        return train(examples, Collections.emptyMap());
+    }
+
+    @Override
+    public EnsembleModel<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance) {
+        return train(examples, runProvenance, INCREMENT_INVOCATION_COUNT);
+    }
+
+    @Override
+    public EnsembleModel<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         // Creates a new RNG, adds one to the invocation count.
         SplittableRandom localRNG;
         TrainerProvenance trainerProvenance;
         synchronized(this) {
+            if(invocationCount != INCREMENT_INVOCATION_COUNT){
+                setInvocationCount(invocationCount);
+            }
             localRNG = rng.split();
             trainerProvenance = getProvenance();
             trainInvocationCounter++;
@@ -146,9 +160,11 @@ public class BaggingTrainer<T extends Output<T>> implements Trainer<T> {
         ImmutableFeatureMap featureIDs = examples.getFeatureIDMap();
         ImmutableOutputInfo<T> labelIDs = examples.getOutputIDInfo();
         ArrayList<Model<T>> models = new ArrayList<>();
+
+        int initialInovcation = innerTrainer.getInvocationCount();
         for (int i = 0; i < numMembers; i++) {
             logger.info("Building model " + i);
-            models.add(trainSingleModel(examples,featureIDs,labelIDs,localRNG,runProvenance));
+            models.add(trainSingleModel(examples,featureIDs,labelIDs,localRNG.nextInt(),runProvenance, initialInovcation + i));
         }
         EnsembleModelProvenance provenance = new EnsembleModelProvenance(WeightedEnsembleModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), trainerProvenance, runProvenance, ListProvenance.createListProvenance(models));
         return new WeightedEnsembleModel<>(ensembleName(),provenance,featureIDs,labelIDs,models,combiner);
@@ -159,19 +175,33 @@ public class BaggingTrainer<T extends Output<T>> implements Trainer<T> {
      * @param examples The training dataset.
      * @param featureIDs The feature domain.
      * @param labelIDs The output domain.
-     * @param localRNG The local RNG instance.
+     * @param randInt A random int from an rng instance
      * @param runProvenance Provenance for this instance.
      * @return The trained ensemble member.
      */
-    protected Model<T> trainSingleModel(Dataset<T> examples, ImmutableFeatureMap featureIDs, ImmutableOutputInfo<T> labelIDs, SplittableRandom localRNG, Map<String,Provenance> runProvenance) {
-        DatasetView<T> bag = DatasetView.createBootstrapView(examples,examples.size(),localRNG.nextInt(),featureIDs,labelIDs);
-        Model<T> newModel = innerTrainer.train(bag,runProvenance);
+    protected Model<T> trainSingleModel(Dataset<T> examples, ImmutableFeatureMap featureIDs, ImmutableOutputInfo<T> labelIDs, int randInt, Map<String,Provenance> runProvenance, int invocationCount) {
+        DatasetView<T> bag = DatasetView.createBootstrapView(examples,examples.size(),randInt,featureIDs,labelIDs);
+        Model<T> newModel = innerTrainer.train(bag,runProvenance, invocationCount);
         return newModel;
     }
 
     @Override
     public int getInvocationCount() {
         return trainInvocationCounter;
+    }
+
+    @Override
+    public synchronized void setInvocationCount(int invocationCount){
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        rng = new SplittableRandom(seed);
+
+        for (trainInvocationCounter = 0; trainInvocationCounter < invocationCount; trainInvocationCounter++){
+            SplittableRandom localRNG = rng.split();
+        }
+
     }
 
     @Override

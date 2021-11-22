@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -141,6 +141,20 @@ public abstract class AbstractCARTTrainer<T extends Output<T>> implements Decisi
     }
 
     @Override
+    public synchronized void setInvocationCount(int invocationCount){
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        rng = new SplittableRandom(seed);
+
+        for (trainInvocationCounter = 0; trainInvocationCounter < invocationCount; trainInvocationCounter++){
+            SplittableRandom localRNG = rng.split();
+        }
+
+    }
+
+    @Override
     public float getFractionFeaturesInSplit() {
         return fractionFeaturesInSplit;
     }
@@ -162,6 +176,11 @@ public abstract class AbstractCARTTrainer<T extends Output<T>> implements Decisi
 
     @Override
     public TreeModel<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance) {
+        return train(examples, runProvenance, INCREMENT_INVOCATION_COUNT);
+    }
+
+    @Override
+    public TreeModel<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         if (examples.getOutputInfo().getUnknownCount() > 0) {
             throw new IllegalArgumentException("The supplied Dataset contained unknown Outputs, and this Trainer is supervised.");
         }
@@ -169,6 +188,9 @@ public abstract class AbstractCARTTrainer<T extends Output<T>> implements Decisi
         SplittableRandom localRNG;
         TrainerProvenance trainerProvenance;
         synchronized(this) {
+            if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+                setInvocationCount(invocationCount);
+            }
             localRNG = rng.split();
             trainerProvenance = getProvenance();
             trainInvocationCounter++;

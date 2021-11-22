@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -176,11 +176,19 @@ public final class XGBoostClassificationTrainer extends XGBoostTrainer<Label> {
 
     @Override
     public synchronized XGBoostModel<Label> train(Dataset<Label> examples, Map<String, Provenance> runProvenance) {
+        return (train(examples, runProvenance, INCREMENT_INVOCATION_COUNT));
+    }
+
+    @Override
+    public synchronized XGBoostModel<Label> train(Dataset<Label> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         if (examples.getOutputInfo().getUnknownCount() > 0) {
             throw new IllegalArgumentException("The supplied Dataset contained unknown Outputs, and this Trainer is supervised.");
         }
         ImmutableFeatureMap featureMap = examples.getFeatureIDMap();
         ImmutableOutputInfo<Label> outputInfo = examples.getOutputIDInfo();
+        if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+            setInvocationCount(invocationCount);
+        }
         TrainerProvenance trainerProvenance = getProvenance();
         trainInvocationCounter++;
         parameters.put("num_class", outputInfo.size());

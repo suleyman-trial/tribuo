@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -184,10 +184,18 @@ public class KMeansTrainer implements Trainer<ClusterID> {
 
     @Override
     public KMeansModel train(Dataset<ClusterID> examples, Map<String, Provenance> runProvenance) {
+        return train(examples, runProvenance, INCREMENT_INVOCATION_COUNT);
+    }
+
+    @Override
+    public KMeansModel train(Dataset<ClusterID> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         // Creates a new local RNG and adds one to the invocation count.
         TrainerProvenance trainerProvenance;
         SplittableRandom localRNG;
         synchronized (this) {
+            if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+                setInvocationCount(invocationCount);
+            }
             localRNG = rng.split();
             trainerProvenance = getProvenance();
             trainInvocationCounter++;
@@ -301,6 +309,20 @@ public class KMeansTrainer implements Trainer<ClusterID> {
     @Override
     public int getInvocationCount() {
         return trainInvocationCounter;
+    }
+
+    @Override
+    public synchronized void setInvocationCount(int invocationCount){
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        rng = new SplittableRandom(seed);
+
+        for (trainInvocationCounter = 0; trainInvocationCounter < invocationCount; trainInvocationCounter++){
+            SplittableRandom localRNG = rng.split();
+        }
+
     }
 
     /**

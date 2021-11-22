@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ public class MultinomialNaiveBayesTrainer implements Trainer<Label>, WeightedExa
     @Config(description="Smoothing parameter.")
     private double alpha = 1.0;
 
-    private int invocationCount = 0;
+    private int trainInvocationCount = 0;
 
     /**
      * Constructs a multinomial naive bayes trainer using a smoothing value of 1.0.
@@ -78,6 +78,11 @@ public class MultinomialNaiveBayesTrainer implements Trainer<Label>, WeightedExa
 
     @Override
     public Model<Label> train(Dataset<Label> examples, Map<String, Provenance> runProvenance) {
+        return train(examples, runProvenance, INCREMENT_INVOCATION_COUNT);
+    }
+
+    @Override
+    public Model<Label> train(Dataset<Label> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         if (examples.getOutputInfo().getUnknownCount() > 0) {
             throw new IllegalArgumentException("The supplied Dataset contained unknown Outputs, and this Trainer is supervised.");
         }
@@ -101,10 +106,12 @@ public class MultinomialNaiveBayesTrainer implements Trainer<Label>, WeightedExa
                 featureMap.merge(featureInfos.getID(feat.getName()), curWeight*feat.getValue(), Double::sum);
             }
         }
-
+        if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+            setInvocationCount(invocationCount);
+        }
         TrainerProvenance trainerProvenance = getProvenance();
         ModelProvenance provenance = new ModelProvenance(MultinomialNaiveBayesModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), trainerProvenance, runProvenance);
-        invocationCount++;
+        trainInvocationCount++;
 
         SparseVector[] labelVectors = new SparseVector[labelInfos.size()];
 
@@ -122,7 +129,16 @@ public class MultinomialNaiveBayesTrainer implements Trainer<Label>, WeightedExa
 
     @Override
     public int getInvocationCount() {
-        return invocationCount;
+        return trainInvocationCount;
+    }
+
+    @Override
+    public void setInvocationCount(int invocationCount) {
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        this.trainInvocationCount = invocationCount;
     }
 
     @Override

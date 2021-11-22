@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,27 +16,20 @@
 
 package org.tribuo.regression.sgd.linear;
 
-import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
-import ai.onnxruntime.OrtSession;
 import com.oracle.labs.mlrg.olcut.util.Pair;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.tribuo.Dataset;
 import org.tribuo.Model;
-import org.tribuo.Prediction;
-import org.tribuo.VariableIDInfo;
-import org.tribuo.VariableInfo;
 import org.tribuo.common.sgd.AbstractLinearSGDModel;
 import org.tribuo.common.sgd.AbstractLinearSGDTrainer;
 import org.tribuo.common.sgd.AbstractSGDTrainer;
-import org.tribuo.interop.onnx.DenseTransformer;
-import org.tribuo.interop.onnx.ONNXExternalModel;
-import org.tribuo.interop.onnx.RegressorTransformer;
+import org.tribuo.interop.onnx.OnnxTestUtils;
 import org.tribuo.math.la.DenseMatrix;
 import org.tribuo.math.la.DenseVector;
+import org.tribuo.math.la.Tensor;
 import org.tribuo.math.optimisers.AdaGrad;
-import org.tribuo.regression.RegressionFactory;
 import org.tribuo.regression.Regressor;
 import org.tribuo.regression.evaluation.RegressionEvaluation;
 import org.tribuo.regression.evaluation.RegressionEvaluator;
@@ -52,13 +45,11 @@ import java.io.ObjectInputStream;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -96,48 +87,13 @@ public class TestSGDLinear {
     @Test
     public void testOnnxSerialization() throws IOException, OrtException {
         Pair<Dataset<Regressor>,Dataset<Regressor>> p = RegressionDataGenerator.denseTrainTest();
-        LinearSGDModel model = (LinearSGDModel) t.train(p.getA());
+        LinearSGDModel model = t.train(p.getA());
 
         // Write out model
         Path onnxFile = Files.createTempFile("tribuo-sgd-test",".onnx");
         model.saveONNXModel("org.tribuo.regression.sgd.linear.test",1,onnxFile);
 
-        // Prep mappings
-        Map<String, Integer> featureMapping = new HashMap<>();
-        for (VariableInfo f : model.getFeatureIDMap()){
-            VariableIDInfo id = (VariableIDInfo) f;
-            featureMapping.put(id.getName(),id.getID());
-        }
-        Map<Regressor, Integer> outputMapping = new HashMap<>();
-        for (Pair<Integer,Regressor> l : model.getOutputIDInfo()) {
-            outputMapping.put(l.getB(), l.getA());
-        }
-
-        String arch = System.getProperty("os.arch");
-        if (arch.equalsIgnoreCase("amd64") || arch.equalsIgnoreCase("x86_64")) {
-            // Initialise the OrtEnvironment to load the native library
-            // (as OrtSession.SessionOptions doesn't trigger the static initializer).
-            OrtEnvironment env = OrtEnvironment.getEnvironment();
-            env.close();
-            // Load in via ORT
-            ONNXExternalModel<Regressor> onnxModel = ONNXExternalModel.createOnnxModel(new RegressionFactory(),featureMapping,outputMapping,new DenseTransformer(),new RegressorTransformer(),new OrtSession.SessionOptions(),onnxFile,"input");
-
-            // Generate predictions
-            List<Prediction<Regressor>> nativePredictions = model.predict(p.getB());
-            List<Prediction<Regressor>> onnxPredictions = onnxModel.predict(p.getB());
-
-            // Assert the predictions are identical
-            for (int i = 0; i < nativePredictions.size(); i++) {
-                Prediction<Regressor> tribuo = nativePredictions.get(i);
-                Prediction<Regressor> external = onnxPredictions.get(i);
-                assertArrayEquals(tribuo.getOutput().getNames(),external.getOutput().getNames());
-                assertArrayEquals(tribuo.getOutput().getValues(),external.getOutput().getValues(),1e-5);
-            }
-
-            onnxModel.close();
-        } else {
-            logger.warning("ORT based tests only supported on x86_64, found " + arch);
-        }
+        OnnxTestUtils.onnxRegressorComparison(model,onnxFile,p.getB(),1e-5);
 
         onnxFile.toFile().delete();
     }
@@ -223,6 +179,48 @@ public class TestSGDLinear {
             Pair<Dataset<Regressor>, Dataset<Regressor>> p = RegressionDataGenerator.multiDimDenseTrainTest();
             Model<Regressor> m = t.train(p.getA());
             m.predict(RegressionDataGenerator.emptyMultiDimExample());
+        });
+    }
+
+    @Test
+    public void testSetInvocationCount() {
+        // Create new trainer and dataset so as not to mess with the other tests
+        LinearSGDTrainer originalTrainer = new LinearSGDTrainer(new SquaredLoss(), new AdaGrad(0.1,0.1),5,1000);
+        Pair<Dataset<Regressor>,Dataset<Regressor>> p = RegressionDataGenerator.denseTrainTest();
+
+        // The number of times to call train before final training.
+        // Original trainer will be trained numOfInvocations + 1 times
+        // New trainer will have its invocation count set to numOfInvocations then trained once
+        int numOfInvocations = 2;
+
+        // Create the first model and train it numOfInvocations + 1 times
+        AbstractLinearSGDModel<Regressor> originalModel = null;
+        for(int invocationCounter = 0; invocationCounter < numOfInvocations + 1; invocationCounter++){
+            originalModel = originalTrainer.train(p.getA());
+        }
+
+        // Create a new model with same configuration, but set the invocation count to numOfInvocations
+        // Assert that this succeeded, this means RNG will be at state where originalTrainer was before
+        // it performed its last train.
+        LinearSGDTrainer newTrainer = new LinearSGDTrainer(new SquaredLoss(), new AdaGrad(0.1,0.1),5,1000);
+        newTrainer.setInvocationCount(numOfInvocations);
+        assertEquals(numOfInvocations,newTrainer.getInvocationCount());
+
+        // Training newTrainer should now have the same result as if it
+        // had trained numOfInvocations times previously even though it hasn't
+        AbstractLinearSGDModel<Regressor> newModel = newTrainer.train(p.getA());
+        assertEquals(originalTrainer.getInvocationCount(),newTrainer.getInvocationCount());
+
+        Tensor newWeights = newModel.getModelParameters().get()[0];
+        Tensor oldWeights = originalModel.getModelParameters().get()[0];
+        assertEquals(newWeights,oldWeights);
+    }
+
+    @Test
+    public void testNegativeInvocationCount(){
+        assertThrows(IllegalArgumentException.class, () -> {
+            LinearSGDTrainer t = new LinearSGDTrainer(new SquaredLoss(), new AdaGrad(0.1,0.1),5,1000);
+            t.setInvocationCount(-1);
         });
     }
 

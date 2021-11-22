@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,9 +86,17 @@ public final class DummyClassifierTrainer implements Trainer<Label> {
 
     @Override
     public Model<Label> train(Dataset<Label> examples, Map<String, Provenance> instanceProvenance) {
+        return train(examples, instanceProvenance, INCREMENT_INVOCATION_COUNT) ;
+    }
+
+    @Override
+    public Model<Label> train(Dataset<Label> examples, Map<String, Provenance> instanceProvenance, int invocationCount) {
+        if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+            this.invocationCount = invocationCount;
+        }
         ModelProvenance provenance = new ModelProvenance(DummyClassifierModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), getProvenance(), instanceProvenance);
         ImmutableFeatureMap featureMap = examples.getFeatureIDMap();
-        invocationCount++;
+        this.invocationCount++;
         switch (dummyType) {
             case CONSTANT:
                 MutableOutputInfo<Label> labelInfo = examples.getOutputInfo().generateMutableOutputInfo();
@@ -112,6 +120,15 @@ public final class DummyClassifierTrainer implements Trainer<Label> {
     @Override
     public int getInvocationCount() {
         return invocationCount;
+    }
+
+    @Override
+    public synchronized void setInvocationCount(int invocationCount){
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        this.invocationCount = invocationCount;
     }
 
     @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
     @Config(description="The threading model to use.")
     private Backend backend = Backend.THREADPOOL;
 
-    private int invocationCount = 0;
+    private int trainInvocationCount = 0;
 
     /**
      * For olcut.
@@ -111,6 +111,11 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
 
     @Override
     public Model<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance) {
+        return(train(examples, runProvenance, INCREMENT_INVOCATION_COUNT));
+    }
+
+    @Override
+    public Model<T> train(Dataset<T> examples, Map<String, Provenance> runProvenance, int invocationCount) {
         ImmutableFeatureMap featureIDMap = examples.getFeatureIDMap();
         ImmutableOutputInfo<T> labelIDMap = examples.getOutputIDInfo();
 
@@ -123,7 +128,10 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
             i++;
         }
 
-        invocationCount++;
+        if(invocationCount != INCREMENT_INVOCATION_COUNT){
+            setInvocationCount(invocationCount);
+        }
+        trainInvocationCount++;
 
         ModelProvenance provenance = new ModelProvenance(KNNModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), getProvenance(), runProvenance);
 
@@ -137,7 +145,16 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
 
     @Override
     public int getInvocationCount() {
-        return invocationCount;
+        return trainInvocationCount;
+    }
+
+    @Override
+    public void setInvocationCount(int invocationCount) {
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+
+        this.trainInvocationCount = invocationCount;
     }
 
     @Override

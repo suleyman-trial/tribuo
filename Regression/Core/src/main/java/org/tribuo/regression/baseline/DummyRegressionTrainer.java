@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,7 +86,7 @@ public final class DummyRegressionTrainer implements Trainer<Regressor> {
     @Config(description="The seed for the RNG.")
     private long seed = 1L;
 
-    private int invocationCount = 0;
+    private int trainInvocationCounter = 0;
 
     private DummyRegressionTrainer() { }
 
@@ -105,8 +105,16 @@ public final class DummyRegressionTrainer implements Trainer<Regressor> {
 
     @Override
     public DummyRegressionModel train(Dataset<Regressor> examples, Map<String, Provenance> instanceProvenance) {
+        return train(examples, instanceProvenance, INCREMENT_INVOCATION_COUNT);
+    }
+
+    @Override
+    public DummyRegressionModel train(Dataset<Regressor> examples, Map<String, Provenance> instanceProvenance, int invocationCount) {
+        if(invocationCount != INCREMENT_INVOCATION_COUNT) {
+            setInvocationCount(invocationCount);
+        }
         ModelProvenance provenance = new ModelProvenance(DummyRegressionModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), getProvenance(), instanceProvenance);
-        invocationCount++;
+        trainInvocationCounter++;
         ImmutableOutputInfo<Regressor> outputInfo = examples.getOutputIDInfo();
         Set<Regressor> domain = outputInfo.getDomain();
         double[][] outputs = new double[outputInfo.size()][examples.size()];
@@ -196,7 +204,15 @@ public final class DummyRegressionTrainer implements Trainer<Regressor> {
 
     @Override
     public int getInvocationCount() {
-        return invocationCount;
+        return trainInvocationCounter;
+    }
+
+    @Override
+    public synchronized void setInvocationCount(int invocationCount){
+        if(invocationCount < 0){
+            throw new IllegalArgumentException("The supplied invocationCount is less than zero.");
+        }
+        this.trainInvocationCounter = invocationCount;
     }
 
     @Override
