@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,24 +16,33 @@
 
 package org.tribuo.regression.liblinear;
 
+import ai.onnx.proto.OnnxMl;
 import com.oracle.labs.mlrg.olcut.util.Pair;
+import de.bwaldvogel.liblinear.FeatureNode;
+import de.bwaldvogel.liblinear.Linear;
 import org.tribuo.Example;
 import org.tribuo.Excuse;
 import org.tribuo.Feature;
 import org.tribuo.ImmutableFeatureMap;
 import org.tribuo.ImmutableOutputInfo;
 import org.tribuo.Model;
+import org.tribuo.ONNXExportable;
 import org.tribuo.Prediction;
 import org.tribuo.common.liblinear.LibLinearModel;
 import org.tribuo.common.liblinear.LibLinearTrainer;
 import org.tribuo.provenance.ModelProvenance;
 import org.tribuo.regression.ImmutableRegressionInfo;
 import org.tribuo.regression.Regressor;
-import de.bwaldvogel.liblinear.FeatureNode;
-import de.bwaldvogel.liblinear.Linear;
+import org.tribuo.util.onnx.ONNXContext;
+import org.tribuo.util.onnx.ONNXInitializer;
+import org.tribuo.util.onnx.ONNXNode;
+import org.tribuo.util.onnx.ONNXOperators;
+import org.tribuo.util.onnx.ONNXPlaceholder;
+import org.tribuo.util.onnx.ONNXRef;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -62,7 +71,7 @@ import java.util.logging.Logger;
  * Machine Learning, 1995.
  * </pre>
  */
-public class LibLinearRegressionModel extends LibLinearModel<Regressor> {
+public class LibLinearRegressionModel extends LibLinearModel<Regressor> implements ONNXExportable {
     private static final long serialVersionUID = 2L;
 
     private static final Logger logger = Logger.getLogger(LibLinearRegressionModel.class.getName());
@@ -180,6 +189,47 @@ public class LibLinearRegressionModel extends LibLinearModel<Regressor> {
         }
 
         return new Excuse<>(e, prediction, weightMap);
+    }
+
+    @Override
+    public OnnxMl.ModelProto exportONNXModel(String domain, long modelVersion) {
+        ONNXContext onnx = new ONNXContext();
+
+        ONNXPlaceholder input = onnx.floatInput(featureIDMap.size());
+        ONNXPlaceholder output = onnx.floatOutput(outputIDInfo.size());
+        onnx.setName("Regression-LibLinear");
+
+        return ONNXExportable.buildModel(writeONNXGraph(input).assignTo(output).onnxContext(), domain, modelVersion, this);
+    }
+
+    @Override
+    public ONNXNode writeONNXGraph(ONNXRef<?> input) {
+        ONNXContext onnx = input.onnxContext();
+        double[][] weights = new double[models.size()][];
+        for (int i = 0; i < models.size(); i++) {
+            weights[i] = models.get(i).getFeatureWeights();
+        }
+        int numFeatures = featureIDMap.size();
+        int numOutputs = outputIDInfo.size();
+
+        // Add weights
+        ONNXInitializer onnxWeights = onnx.floatTensor("liblinear-weights", Arrays.asList(numFeatures, numOutputs), fb -> {
+            for (int j = 0; j < numFeatures; j++) {
+                for (int i = 0; i < weights.length; i++) {
+                    fb.put((float) weights[i][j]);
+                }
+            }
+        });
+
+        //Add biases
+        ONNXInitializer onnxBiases = onnx.floatTensor("liblinear-bias", Collections.singletonList(numOutputs), fb -> {
+            // Biases are stored last in the weight vector
+            for (int i = 0; i < weights.length; i++) {
+                fb.put((float) weights[i][numFeatures]);
+            }
+        });
+
+        return input.apply(ONNXOperators.GEMM, Arrays.asList(onnxWeights, onnxBiases));
     }
 
     private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {

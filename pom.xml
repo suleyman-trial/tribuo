@@ -20,7 +20,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.tribuo</groupId>
     <artifactId>tribuo</artifactId>
-    <version>4.2.0-SNAPSHOT</version>
+    <version>4.3.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <modules>
         <module>Core</module>
@@ -44,11 +44,14 @@
         <!-- MLRG dependencies -->
         <olcut.version>5.2.0</olcut.version>
 
+        <!-- Oracle dependencies -->
+        <oci.sdk.version>2.12.0</oci.sdk.version>
+
         <!-- 3rd party backend dependencies -->
         <liblinear.version>2.43</liblinear.version>
         <libsvm.version>3.25</libsvm.version>
         <onnxruntime.version>1.9.0</onnxruntime.version>
-        <tensorflow.version>0.3.1</tensorflow.version>
+        <tensorflow.version>0.4.0</tensorflow.version>
         <xgboost.version>1.5.0</xgboost.version>
 
         <!-- 3rd party other dependencies -->
@@ -200,11 +203,6 @@
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-source-plugin</artifactId>
-                    <version>3.1.0</version>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-install-plugin</artifactId>
                     <version>3.0.0-M1</version>
                 </plugin>
@@ -216,6 +214,12 @@
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <version>3.3.1</version>
                 <configuration>
+                    <additionalJOptions>
+                        <additionalJOption>-Xmaxerrs</additionalJOption>
+                        <additionalJOption>65536</additionalJOption>
+                        <additionalJOption>-Xmaxwarns</additionalJOption>
+                        <additionalJOption>65536</additionalJOption>
+                    </additionalJOptions>
                     <source>8</source>
                     <show>protected</show>
                     <notimestamp>true</notimestamp>
@@ -245,7 +249,7 @@
                         <group>
                             <title>Core Packages</title>
                             <packages>
-                                org.tribuo:org.tribuo.dataset:org.tribuo.datasource:org.tribuo.ensemble:org.tribuo.evaluation*:org.tribuo.hash:org.tribuo.impl:org.tribuo.onnx:org.tribuo.provenance*:org.tribuo.sequence:org.tribuo.transform*:org.tribuo.util:org.tribuo.data*:org.tribuo.json:org.tribuo.math*
+                                org.tribuo:org.tribuo.dataset:org.tribuo.datasource:org.tribuo.ensemble:org.tribuo.evaluation*:org.tribuo.hash:org.tribuo.impl:org.tribuo.provenance*:org.tribuo.sequence:org.tribuo.transform*:org.tribuo.util:org.tribuo.data*:org.tribuo.json:org.tribuo.math*
                             </packages>
                         </group>
                         <group>
@@ -278,7 +282,7 @@
                         </group>
                         <group>
                             <title>Utility Packages</title>
-                            <packages>org.tribuo.util.*:org.tribuo.tests</packages>
+                            <packages>org.tribuo.util.*:org.tribuo.reproducibility:org.tribuo.tests</packages>
                         </group>
                     </groups>
                 </configuration>
@@ -290,13 +294,19 @@
                         </goals>
                         <phase>site</phase>
                         <configuration>
+                            <additionalJOptions>
+                                <additionalJOption>-Xmaxerrs</additionalJOption>
+                                <additionalJOption>65536</additionalJOption>
+                                <additionalJOption>-Xmaxwarns</additionalJOption>
+                                <additionalJOption>65536</additionalJOption>
+                            </additionalJOptions>
                             <overview>./Core/src/main/javadoc/overview.html</overview>
                             <bottom>Copyright &#169; 2015&#x2013;2021 Oracle and/or its affiliates. All rights reserved.</bottom>
                             <groups>
                                 <group>
                                     <title>Core Packages</title>
                                     <packages>
-                                        org.tribuo:org.tribuo.dataset:org.tribuo.datasource:org.tribuo.ensemble:org.tribuo.evaluation*:org.tribuo.hash:org.tribuo.impl:org.tribuo.onnx:org.tribuo.provenance*:org.tribuo.sequence:org.tribuo.transform*:org.tribuo.util:org.tribuo.data*:org.tribuo.json:org.tribuo.math*
+                                        org.tribuo:org.tribuo.dataset:org.tribuo.datasource:org.tribuo.ensemble:org.tribuo.evaluation*:org.tribuo.hash:org.tribuo.impl:org.tribuo.provenance*:org.tribuo.sequence:org.tribuo.transform*:org.tribuo.util:org.tribuo.data*:org.tribuo.json:org.tribuo.math*
                                     </packages>
                                 </group>
                                 <group>
@@ -329,7 +339,7 @@
                                 </group>
                                 <group>
                                     <title>Utility Packages</title>
-                                    <packages>org.tribuo.util.*</packages>
+                                    <packages>org.tribuo.util.*:org.tribuo.reproducibility:org.tribuo.tests</packages>
                                 </group>
                             </groups>
                         </configuration>
@@ -427,7 +437,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.2.0</version>
+                        <version>3.3.1</version>
                         <configuration>
                             <bottom>Copyright &#169; 2015&#x2013;2021 Oracle and/or its affiliates. All rights reserved.</bottom>
                         </configuration>

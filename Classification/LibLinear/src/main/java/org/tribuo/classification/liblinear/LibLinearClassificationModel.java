@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,22 +16,31 @@
 
 package org.tribuo.classification.liblinear;
 
+import ai.onnx.proto.OnnxMl;
 import com.oracle.labs.mlrg.olcut.util.Pair;
+import de.bwaldvogel.liblinear.FeatureNode;
+import de.bwaldvogel.liblinear.Linear;
 import org.tribuo.Example;
 import org.tribuo.Excuse;
 import org.tribuo.Feature;
 import org.tribuo.ImmutableFeatureMap;
 import org.tribuo.ImmutableOutputInfo;
 import org.tribuo.Model;
+import org.tribuo.ONNXExportable;
 import org.tribuo.Prediction;
 import org.tribuo.classification.Label;
 import org.tribuo.common.liblinear.LibLinearModel;
 import org.tribuo.common.liblinear.LibLinearTrainer;
 import org.tribuo.provenance.ModelProvenance;
-import de.bwaldvogel.liblinear.FeatureNode;
-import de.bwaldvogel.liblinear.Linear;
+import org.tribuo.util.onnx.ONNXContext;
+import org.tribuo.util.onnx.ONNXInitializer;
+import org.tribuo.util.onnx.ONNXNode;
+import org.tribuo.util.onnx.ONNXOperators;
+import org.tribuo.util.onnx.ONNXPlaceholder;
+import org.tribuo.util.onnx.ONNXRef;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -61,7 +70,7 @@ import java.util.logging.Logger;
  * Machine Learning, 1995.
  * </pre>
  */
-public class LibLinearClassificationModel extends LibLinearModel<Label> {
+public class LibLinearClassificationModel extends LibLinearModel<Label> implements ONNXExportable {
     private static final long serialVersionUID = 3L;
 
     private static final Logger logger = Logger.getLogger(LibLinearClassificationModel.class.getName());
@@ -277,4 +286,82 @@ public class LibLinearClassificationModel extends LibLinearModel<Label> {
 
         return new Excuse<>(e, prediction, weightMap);
     }
+
+    @Override
+    public OnnxMl.ModelProto exportONNXModel(String domain, long modelVersion) {
+        ONNXContext onnx = new ONNXContext();
+
+        onnx.setName("Classification-LibLinear");
+        ONNXPlaceholder input = onnx.floatInput(featureIDMap.size());
+        ONNXPlaceholder output = onnx.floatOutput(outputIDInfo.size());
+
+        // Build graph
+        writeONNXGraph(input).assignTo(output);
+
+        return ONNXExportable.buildModel(onnx, domain, modelVersion, this);
+    }
+
+    @Override
+    public ONNXNode writeONNXGraph(ONNXRef<?> input) {
+
+        ONNXContext onnx = input.onnxContext();
+
+        de.bwaldvogel.liblinear.Model model = models.get(0);
+        double[] rawWeights = model.getFeatureWeights();
+        int[] labels = model.getLabels();
+        int numFeatures = featureIDMap.size();
+        int numLabels = labels.length;
+        if (numLabels != outputIDInfo.size()) {
+            throw new IllegalStateException("Unexpected number of labels, output domain = " + outputIDInfo.size() + ", LibLinear's internal count = " + numLabels);
+        }
+
+        // setup weight arrays for easy processing
+        if (model.getNrClass() == 2) {
+            // Replicate weights in binary problems
+            double[] newWeights = new double[rawWeights.length*2];
+            for (int i = 0; i < rawWeights.length; i++) {
+                if (labels[0] == 0) {
+                    newWeights[i * 2] = rawWeights[i];
+                    newWeights[(i * 2) + 1] = -rawWeights[i];
+                } else {
+                    newWeights[i * 2] = -rawWeights[i];
+                    newWeights[(i * 2) + 1] = rawWeights[i];
+                }
+            }
+            rawWeights = newWeights;
+        } else {
+            double[] newWeights = new double[rawWeights.length];
+            for (int j = 0; j < numFeatures + 1; j++) {
+                for (int i = 0; i < numLabels; i++) {
+                    int newIdx = (j * numLabels) + labels[i];
+                    int oldIdx = (j * numLabels) + i;
+                    newWeights[newIdx] = rawWeights[oldIdx];
+                }
+            }
+            rawWeights = newWeights;
+        }
+
+        final double[] weights = rawWeights;
+
+        ONNXInitializer weightTensor = onnx.floatTensor("liblinear_weights", Arrays.asList(numFeatures, numLabels), fb -> {
+            for (int i = 0; i < weights.length - numLabels; i++) {
+                fb.put((float) weights[i]);
+            }
+        });
+
+        ONNXInitializer biasTensor = onnx.floatTensor("liblinear_biases", Collections.singletonList(numLabels), fb -> {
+            for (int i = numFeatures * numLabels; i < weights.length; i++) {
+                fb.put((float) weights[i]);
+            }
+        });
+
+        ONNXNode gemm = input.apply(ONNXOperators.GEMM, Arrays.asList(weightTensor, biasTensor));
+
+        if(model.isProbabilityModel()) {
+            return gemm.apply(ONNXOperators.SOFTMAX, Collections.singletonMap("axis", 1));
+        } else {
+            return gemm;
+        }
+    }
+
 }

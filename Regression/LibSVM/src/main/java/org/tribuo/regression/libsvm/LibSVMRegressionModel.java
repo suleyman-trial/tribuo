@@ -16,27 +16,37 @@
 
 package org.tribuo.regression.libsvm;
 
+import ai.onnx.proto.OnnxMl;
+import libsvm.svm;
+import libsvm.svm_model;
+import libsvm.svm_node;
 import org.tribuo.Example;
 import org.tribuo.ImmutableFeatureMap;
 import org.tribuo.ImmutableOutputInfo;
+import org.tribuo.ONNXExportable;
 import org.tribuo.Prediction;
+import org.tribuo.common.libsvm.KernelType;
 import org.tribuo.common.libsvm.LibSVMModel;
 import org.tribuo.common.libsvm.LibSVMTrainer;
 import org.tribuo.provenance.ModelProvenance;
 import org.tribuo.regression.ImmutableRegressionInfo;
 import org.tribuo.regression.Regressor;
-import libsvm.svm;
-import libsvm.svm_model;
-import libsvm.svm_node;
+import org.tribuo.util.Util;
+import org.tribuo.util.onnx.ONNXContext;
+import org.tribuo.util.onnx.ONNXInitializer;
+import org.tribuo.util.onnx.ONNXNode;
+import org.tribuo.util.onnx.ONNXOperators;
+import org.tribuo.util.onnx.ONNXPlaceholder;
+import org.tribuo.util.onnx.ONNXRef;
 
 import java.io.IOException;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * A regression model that uses an underlying libSVM model to make the
@@ -61,7 +71,7 @@ import java.util.Map;
  * Machine Learning, 1995.
  * </pre>
  */
-public class LibSVMRegressionModel extends LibSVMModel<Regressor> {
+public class LibSVMRegressionModel extends LibSVMModel<Regressor> implements ONNXExportable {
     private static final long serialVersionUID = 2L;
 
     private final String[] dimensionNames;
@@ -109,6 +119,14 @@ public class LibSVMRegressionModel extends LibSVMModel<Regressor> {
         this.variances = variances;
         this.standardized = true;
         this.mapping = ((ImmutableRegressionInfo) outputIDInfo).getIDtoNaturalOrderMapping();
+    }
+
+    /**
+     * Is this LibSVMRegressionModel operating in a standardized space.
+     * @return True if the model has been standardized.
+     */
+    boolean isStandardized() {
+        return standardized;
     }
 
     /**
@@ -176,6 +194,66 @@ public class LibSVMRegressionModel extends LibSVMModel<Regressor> {
             newModels.add(copyModel(m));
         }
         return new LibSVMRegressionModel(newName,newProvenance,featureIDMap,outputIDInfo,newModels);
+    }
+
+    @Override
+    public OnnxMl.ModelProto exportONNXModel(String domain, long modelVersion) {
+        ONNXContext onnx = new ONNXContext();
+
+        ONNXPlaceholder input = onnx.floatInput(featureIDMap.size());
+        ONNXPlaceholder output = onnx.floatOutput(outputIDInfo.size());
+        onnx.setName("Regression-LibSVM");
+
+        return ONNXExportable.buildModel(writeONNXGraph(input).assignTo(output).onnxContext(), domain, modelVersion, this);
+    }
+
+    private static ONNXNode buildONNXSVMRegressor(int numFeatures, ONNXRef<?> input, svm_model model) {
+        // Extract the attributes
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("coefficients", Util.toFloatArray(model.sv_coef[0]));
+        attributes.put("kernel_params", new float[]{(float) model.param.gamma, (float) model.param.coef0, model.param.degree});
+        attributes.put("kernel_type", KernelType.getKernelType(model.param.kernel_type).name());
+        attributes.put("n_supports", model.l);
+        attributes.put("one_class", 0);
+        attributes.put("rho", new float[]{(float) -model.rho[0]});
+        // Extract the support vectors
+        float[] supportVectors = new float[model.l * numFeatures];
+
+        for (int j = 0; j < model.l; j++) {
+            svm_node[] sv = model.SV[j];
+            for (svm_node svm_node : sv) {
+                int idx = (j * numFeatures) + svm_node.index;
+                supportVectors[idx] = (float) svm_node.value;
+            }
+        }
+        attributes.put("support_vectors", supportVectors);
+        return input.apply(ONNXOperators.SVM_REGRESSOR, attributes);
+    }
+
+    @Override
+    public ONNXNode writeONNXGraph(ONNXRef<?> input) {
+        ONNXContext onnx = input.onnxContext();
+
+        final int numFeatures = featureIDMap.size();
+
+
+        // Make the individual SVM Regressors for each dimension
+        List<ONNXNode> outputs = models.stream()
+                .map(model -> buildONNXSVMRegressor(numFeatures, input, model))
+                .collect(Collectors.toList());
+
+        // Make concat to bring them all together
+        ONNXNode concat = onnx.operation(ONNXOperators.CONCAT, outputs, "concat_output", Collections.singletonMap("axis", 1));
+
+        if(standardized) {
+            ONNXInitializer outputMean = onnx.array("y_mean", means);
+            ONNXInitializer outputVariance = onnx.array("y_variances", variances);
+
+            return concat.apply(ONNXOperators.MUL, outputVariance)
+                    .apply(ONNXOperators.ADD, outputMean);
+        } else {
+            return concat;
+        }
     }
 
     private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {

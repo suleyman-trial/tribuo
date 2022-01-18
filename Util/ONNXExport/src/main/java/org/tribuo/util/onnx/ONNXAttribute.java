@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.tribuo.onnx;
+package org.tribuo.util.onnx;
 
 import com.google.protobuf.ByteString;
 import ai.onnx.proto.OnnxMl;
@@ -147,6 +147,7 @@ public final class ONNXAttribute {
                 } else {
                     throw new IllegalArgumentException("Expected TensorProto, found " + value.getClass() + " with value " + value);
                 }
+                break;
             case GRAPH:
             case SPARSE_TENSOR:
             case TENSORS:
