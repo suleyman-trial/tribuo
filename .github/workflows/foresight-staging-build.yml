@@ -35,6 +35,6 @@ jobs:
         env:
           THUNDRA_AGENT_REPORT_REST_BASEURL: https://collector.thundra.us/v1
         with:
-          apikey: ${{ secrets.THUNDRA_API_KEY }}
-          project_id: ${{ secrets.THUNDRA_TRIBUO_PROJECTID }}
+          apikey: ${{ secrets.THUNDRA_STAGING_API_KEY }}
+          project_id: ${{ secrets.THUNDRA_STAGING_TRIBUO_PROJECTID }}
           command: mvn clean install
