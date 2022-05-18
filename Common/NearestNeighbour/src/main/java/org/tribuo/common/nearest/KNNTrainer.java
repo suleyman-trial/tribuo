@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2022, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,13 @@ import org.tribuo.Output;
 import org.tribuo.Trainer;
 import org.tribuo.common.nearest.KNNModel.Backend;
 import org.tribuo.ensemble.EnsembleCombiner;
+import org.tribuo.math.distance.DistanceType;
+import org.tribuo.math.la.DenseVector;
+import org.tribuo.math.la.SGDVector;
 import org.tribuo.math.la.SparseVector;
+import org.tribuo.math.neighbour.NeighboursQueryFactory;
+import org.tribuo.math.neighbour.NeighboursQueryFactoryType;
+import org.tribuo.math.neighbour.bruteforce.NeighboursBruteForceFactory;
 import org.tribuo.provenance.ModelProvenance;
 import org.tribuo.provenance.TrainerProvenance;
 import org.tribuo.provenance.impl.TrainerProvenanceImpl;
@@ -44,24 +50,46 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
 
     /**
      * The available distance functions.
+     * @deprecated
+     * This Enum is deprecated in version 4.3, replaced by {@link DistanceType}
      */
+    @Deprecated
     public enum Distance {
         /**
          * L1 (or Manhattan) distance.
          */
-        L1,
+        L1(DistanceType.L1),
         /**
          * L2 (or Euclidean) distance.
          */
-        L2,
+        L2(DistanceType.L2),
         /**
          * Cosine similarity used as a distance measure.
          */
-        COSINE
+        COSINE(DistanceType.COSINE);
+
+        private final DistanceType distanceType;
+
+        Distance(DistanceType distanceType) {
+            this.distanceType = distanceType;
+        }
+
+        /**
+         * Returns the {@link DistanceType} mapping for the enumeration's value.
+         *
+         * @return distanceType The {@link DistanceType} value.
+         */
+        public DistanceType getDistanceType() {
+            return distanceType;
+        }
     }
 
-    @Config(mandatory = true, description="The distance function used to measure nearest neighbours.")
+    @Deprecated
+    @Config(description="The distance function used to measure nearest neighbours. This is now deprecated.")
     private Distance distance;
+
+    @Config(description = "The distance function used to measure nearest neighbours.")
+    private DistanceType distType;
 
     @Config(mandatory = true, description="The number of nearest neighbours to check.")
     private int k;
@@ -75,6 +103,9 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
     @Config(description="The threading model to use.")
     private Backend backend = Backend.THREADPOOL;
 
+    @Config(description = "The nearest neighbour implementation factory to use.")
+    private NeighboursQueryFactory neighboursQueryFactory;
+
     private int trainInvocationCount = 0;
 
     /**
@@ -85,17 +116,57 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
     /**
      * Creates a K-NN trainer using the supplied parameters.
      * @param k The number of nearest neighbours to consider.
+     * @param distType The distance function.
+     * @param numThreads The number of threads to use.
+     * @param combiner The combination function to aggregate the k predictions.
+     * @param backend The computational backend.
+     * @param nqFactoryType The nearest neighbour implementation factory to use.
+     */
+    public KNNTrainer(int k, DistanceType distType, int numThreads, EnsembleCombiner<T> combiner,
+                      Backend backend, NeighboursQueryFactoryType nqFactoryType) {
+        this.k = k;
+        this.distType = distType;
+        this.numThreads = numThreads;
+        this.combiner = combiner;
+        this.backend = backend;
+        this.neighboursQueryFactory = NeighboursQueryFactoryType.getNeighboursQueryFactory(nqFactoryType, distType, numThreads);
+        postConfig();
+    }
+
+    /**
+     * Creates a K-NN trainer using the supplied parameters. {@link #neighboursQueryFactory} defaults to
+     * {@link NeighboursBruteForceFactory}.
+     * @deprecated
+     * This Constructor is deprecated in version 4.3.
+     *
+     * @param k The number of nearest neighbours to consider.
      * @param distance The distance function.
      * @param numThreads The number of threads to use.
      * @param combiner The combination function to aggregate the k predictions.
      * @param backend The computational backend.
      */
+    @Deprecated
     public KNNTrainer(int k, Distance distance, int numThreads, EnsembleCombiner<T> combiner, Backend backend) {
+        this(k, distance.getDistanceType(), numThreads, combiner, backend, NeighboursQueryFactoryType.BRUTE_FORCE);
+    }
+
+    /**
+     * Creates a K-NN trainer using the supplied parameters.
+     *
+     * @param k The number of nearest neighbours to consider.
+     * @param numThreads The number of threads to use.
+     * @param combiner The combination function to aggregate the k predictions.
+     * @param backend The computational backend.
+     * @param neighboursQueryFactory The nearest neighbour implementation factory to use.
+     */
+    public KNNTrainer(int k, int numThreads, EnsembleCombiner<T> combiner,
+                      Backend backend, NeighboursQueryFactory neighboursQueryFactory) {
         this.k = k;
-        this.distance = distance;
+        this.distType = neighboursQueryFactory.getDistanceType();
         this.numThreads = numThreads;
         this.combiner = combiner;
         this.backend = backend;
+        this.neighboursQueryFactory = neighboursQueryFactory;
         postConfig();
     }
 
@@ -103,9 +174,28 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
      * Used by the OLCUT configuration system, and should not be called by external code.
      */
     @Override
-    public void postConfig() {
+    public synchronized void postConfig() {
         if (k < 1) {
             throw new PropertyException("","k","k must be greater than 0");
+        }
+
+        if (this.distance != null) {
+            if (this.distType != null) {
+                throw new PropertyException("distType", "Both distType and distanceType must not both be set.");
+            } else {
+                this.distType = this.distance.getDistanceType();
+                this.distance = null;
+            }
+        }
+
+        if (neighboursQueryFactory == null) {
+            int numberThreads = (this.numThreads <= 0) ? 1 : this.numThreads;
+            this.neighboursQueryFactory = new NeighboursBruteForceFactory(distType, numberThreads);
+        } else {
+            if (!this.distType.equals(neighboursQueryFactory.getDistanceType())) {
+                throw new PropertyException("neighboursQueryFactory", "distType and its field on the " +
+                    "NeighboursQueryFactory must be equal.");
+            }
         }
     }
 
@@ -120,11 +210,15 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
         ImmutableOutputInfo<T> labelIDMap = examples.getOutputIDInfo();
 
         @SuppressWarnings("unchecked") // generic array creation
-        Pair<SparseVector,T>[] vectors = new Pair[examples.size()];
+        Pair<SGDVector,T>[] vectors = new Pair[examples.size()];
 
         int i = 0;
         for (Example<T> e : examples) {
-            vectors[i] = new Pair<>(SparseVector.createSparseVector(e,featureIDMap,false),e.getOutput());
+            if (e.size() == featureIDMap.size()) {
+                vectors[i] = new Pair<>(DenseVector.createDenseVector(e, featureIDMap, false),e.getOutput());
+            } else {
+                vectors[i] = new Pair<>(SparseVector.createSparseVector(e,featureIDMap,false),e.getOutput());
+            }
             i++;
         }
 
@@ -135,12 +229,13 @@ public class KNNTrainer<T extends Output<T>> implements Trainer<T> {
 
         ModelProvenance provenance = new ModelProvenance(KNNModel.class.getName(), OffsetDateTime.now(), examples.getProvenance(), getProvenance(), runProvenance);
 
-        return new KNNModel<>(k+"nn",provenance, featureIDMap, labelIDMap, false, k, distance, numThreads, combiner, vectors, backend);
+        return new KNNModel<>(k+"nn",provenance, featureIDMap, labelIDMap, false, k, distType,
+            numThreads, combiner, vectors, backend, neighboursQueryFactory);
     }
 
     @Override
     public String toString() {
-        return "KNNTrainer(k="+k+",distance="+distance+",combiner="+combiner.toString()+",numThreads="+numThreads+")";
+        return "KNNTrainer(k="+k+",distanceType="+distType+",combiner="+combiner.toString()+",numThreads="+numThreads+")";
     }
 
     @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021-2022, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@ package org.tribuo.clustering.hdbscan;
 
 import com.oracle.labs.mlrg.olcut.config.Option;
 import com.oracle.labs.mlrg.olcut.config.Options;
-import org.tribuo.clustering.hdbscan.HdbscanTrainer.Distance;
+import org.tribuo.math.distance.DistanceType;
+import org.tribuo.math.neighbour.NeighboursQueryFactoryType;
 
 import java.util.logging.Logger;
 
@@ -35,19 +36,20 @@ public final class HdbscanOptions implements Options {
     /**
      * The minimum number of points required to form a cluster. Defaults to 5.
      */
-    @Option(longName = "minimum-cluster-size", usage = "The minimum number of points required to form a cluster.")
+    @Option(longName = "hdbscan-minimum-cluster-size", usage = "The minimum number of points required to form a cluster.")
     public int minClusterSize = 5;
 
+
     /**
-     * Distance function in HDBSCAN*. Defaults to EUCLIDEAN.
+     * Distance function in HDBSCAN*. Defaults to L2 (EUCLIDEAN).
      */
-    @Option(longName = "distance-function", usage = "Distance function to use for various distance calculations.")
-    public Distance distanceType = Distance.EUCLIDEAN;
+    @Option(longName = "hdbscan-distance-type", usage = "The type of distance function to use for various distance calculations.")
+    public DistanceType distType = DistanceType.L2;
 
     /**
      * The number of nearest-neighbors to use in the initial density approximation. Defaults to 5.
      */
-    @Option(longName = "k-nearest-neighbors", usage = "The number of nearest-neighbors to use in the initial density approximation. " +
+    @Option(longName = "hdbscan-k-nearest-neighbors", usage = "The number of nearest-neighbors to use in the initial density approximation. " +
         "The value includes the point itself.")
     public int k = 5;
 
@@ -58,11 +60,17 @@ public final class HdbscanOptions implements Options {
     public int numThreads = 2;
 
     /**
+     * The nearest neighbour implementation factory to use. Defaults to {@link NeighboursQueryFactoryType#KD_TREE}.
+     */
+    @Option(longName = "hdbscan-neighbour-query-factory-type", usage = "The nearest neighbour implementation factory to use.")
+    public NeighboursQueryFactoryType nqFactoryType = NeighboursQueryFactoryType.KD_TREE;
+
+    /**
      * Gets the configured HdbscanTrainer using the options in this object.
      * @return A HdbscanTrainer.
      */
     public HdbscanTrainer getTrainer() {
         logger.info("Configuring Hdbscan Trainer");
-        return new HdbscanTrainer(minClusterSize, distanceType, k, numThreads);
+        return new HdbscanTrainer(minClusterSize, distType, k, numThreads, nqFactoryType);
     }
 }

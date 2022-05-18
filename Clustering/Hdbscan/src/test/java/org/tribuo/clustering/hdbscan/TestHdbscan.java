@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2022 Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.tribuo.DataSource;
 import org.tribuo.Dataset;
+import org.tribuo.Feature;
 import org.tribuo.Model;
 import org.tribuo.MutableDataset;
 import org.tribuo.Prediction;
@@ -30,7 +31,6 @@ import org.tribuo.clustering.evaluation.ClusteringEvaluation;
 import org.tribuo.clustering.evaluation.ClusteringEvaluator;
 import org.tribuo.clustering.example.ClusteringDataGenerator;
 import org.tribuo.clustering.example.GaussianClusterDataSource;
-import org.tribuo.clustering.hdbscan.HdbscanTrainer.Distance;
 import org.tribuo.data.columnar.FieldProcessor;
 import org.tribuo.data.columnar.ResponseProcessor;
 import org.tribuo.data.columnar.RowProcessor;
@@ -38,14 +38,26 @@ import org.tribuo.data.columnar.processors.field.DoubleFieldProcessor;
 import org.tribuo.data.columnar.processors.response.EmptyResponseProcessor;
 import org.tribuo.data.csv.CSVDataSource;
 import org.tribuo.evaluation.TrainTestSplitter;
+import org.tribuo.impl.ArrayExample;
+import org.tribuo.math.distance.DistanceType;
+import org.tribuo.math.la.DenseVector;
+import org.tribuo.math.la.SGDVector;
+import org.tribuo.math.neighbour.NeighboursQueryFactory;
+import org.tribuo.math.neighbour.NeighboursQueryFactoryType;
+import org.tribuo.math.neighbour.kdtree.KDTreeFactory;
 import org.tribuo.test.Helpers;
 
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -54,13 +66,15 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Unit tests with small datasets for Hdbscan
  */
 public class TestHdbscan {
 
-    private static final HdbscanTrainer t = new HdbscanTrainer(5, Distance.EUCLIDEAN, 5,2);
+    private static final HdbscanTrainer t = new HdbscanTrainer(5, DistanceType.L2, 5,2, NeighboursQueryFactoryType.KD_TREE);
 
     @BeforeAll
     public static void setup() {
@@ -82,7 +96,7 @@ public class TestHdbscan {
         CSVDataSource<ClusterID> csvSource = new CSVDataSource<>(Paths.get("src/test/resources/basic-gaussians.csv"),rowProcessor,false);
         Dataset<ClusterID> dataset = new MutableDataset<>(csvSource);
 
-        HdbscanTrainer trainer = new HdbscanTrainer(7, Distance.EUCLIDEAN, 7,4);
+        HdbscanTrainer trainer = new HdbscanTrainer(7, DistanceType.L2, 7,4, NeighboursQueryFactoryType.BRUTE_FORCE);
         for (int i = 0; i < 5; i++) {
             HdbscanModel model = trainer.train(dataset);
         }
@@ -110,7 +124,8 @@ public class TestHdbscan {
         CSVDataSource<ClusterID> csvSource = new CSVDataSource<>(Paths.get("src/test/resources/basic-gaussians.csv"),rowProcessor,false);
         Dataset<ClusterID> dataset = new MutableDataset<>(csvSource);
 
-        HdbscanTrainer trainer = new HdbscanTrainer(7, Distance.EUCLIDEAN, 7,4);
+        NeighboursQueryFactory kdTreeFactory = new KDTreeFactory(DistanceType.L2, 4);
+        HdbscanTrainer trainer = new HdbscanTrainer(7,7,kdTreeFactory);
         HdbscanModel model = trainer.train(dataset);
 
         List<Integer> clusterLabels = model.getClusterLabels();
@@ -141,7 +156,7 @@ public class TestHdbscan {
         CSVDataSource<ClusterID> csvTestSource = new CSVDataSource<>(Paths.get("src/test/resources/basic-gaussians-predict.csv"),rowProcessor,false);
         Dataset<ClusterID> testSet = new MutableDataset<>(csvTestSource);
 
-        HdbscanTrainer trainer = new HdbscanTrainer(7, Distance.EUCLIDEAN, 7,1);
+        HdbscanTrainer trainer = new HdbscanTrainer(7, DistanceType.L2, 7,1, NeighboursQueryFactoryType.BRUTE_FORCE);
         HdbscanModel model = trainer.train(dataset);
 
         List<Integer> clusterLabels = model.getClusterLabels();
@@ -172,6 +187,26 @@ public class TestHdbscan {
 
         assertArrayEquals(expectedLabelPredictions, actualLabelPredictions);
         assertArrayEquals(expectedOutlierScorePredictions, actualOutlierScorePredictions);
+
+        CSVDataSource<ClusterID> nextCsvTestSource = new CSVDataSource<>(Paths.get("src/test/resources/basic-gaussians-predict-with-outliers.csv"),rowProcessor,false);
+        Dataset<ClusterID> nextTestSet = new MutableDataset<>(nextCsvTestSource);
+
+        predictions = model.predict(nextTestSet);
+
+        i = 0;
+        actualLabelPredictions = new int[nextTestSet.size()];
+        actualOutlierScorePredictions = new double[nextTestSet.size()];
+        for (Prediction<ClusterID> pred : predictions) {
+            actualLabelPredictions[i] = pred.getOutput().getID();
+            actualOutlierScorePredictions[i] = pred.getOutput().getScore();
+            i++;
+        }
+
+        int[] nextExpectedLabelPredictions = {5,0,3,0,4,0};
+        double[] nextExpectedOutlierScorePredictions = {0.04384108680937504,0.837375806784261,0.04922915472735656,0.837375806784261,0.02915273635987492,0.837375806784261};
+
+        assertArrayEquals(nextExpectedLabelPredictions, actualLabelPredictions);
+        assertArrayEquals(nextExpectedOutlierScorePredictions, actualOutlierScorePredictions);
     }
 
     public static void runBasicTrainPredict(HdbscanTrainer trainer) {
@@ -181,8 +216,35 @@ public class TestHdbscan {
         Dataset<ClusterID> testData = new MutableDataset<>(splitter.getTest());
 
         HdbscanModel model = trainer.train(trainData);
+
+        for (HdbscanTrainer.ClusterExemplar e : model.getClusterExemplars()) {
+            assertTrue(e.getMaxDistToEdge() > 0.0);
+        }
+
         List<Integer> clusterLabels = model.getClusterLabels();
         List<Double> outlierScores = model.getOutlierScores();
+        List<Pair<Integer,List<Feature>>> exemplarLists = model.getClusters();
+        List<HdbscanTrainer.ClusterExemplar> exemplars = model.getClusterExemplars();
+
+        assertEquals(exemplars.size(), exemplarLists.size());
+
+        // Check there's at least one exemplar per label
+        Set<Integer> exemplarLabels = exemplarLists.stream().map(Pair::getA).collect(Collectors.toSet());
+        Set<Integer> clusterLabelSet = new HashSet<>(clusterLabels);
+        // Remove the noise label
+        clusterLabelSet.remove(Integer.valueOf(0));
+        assertEquals(exemplarLabels,clusterLabelSet);
+
+        for (int i = 0; i < exemplars.size(); i++) {
+            HdbscanTrainer.ClusterExemplar e = exemplars.get(i);
+            Pair<Integer, List<Feature>> p = exemplarLists.get(i);
+            assertEquals(model.getFeatureIDMap().size(), e.getFeatures().size());
+            assertEquals(p.getB().size(), e.getFeatures().size());
+            SGDVector otherFeatures = DenseVector.createDenseVector(
+                    new ArrayExample<>(trainData.getOutputFactory().getUnknownOutput(), p.getB()),
+                    model.getFeatureIDMap(), false);
+            assertEquals(otherFeatures, e.getFeatures());
+        }
 
         int [] expectedIntClusterLabels = {4,3,4,5,3,5,3,4,3,4,5,5,3,4,4,0,3,4,0,5,5,3,3,4,4,4,4,4,4,4,4,4,4,0,4,5,3,5,3,4,3,4,4,3,0,5,0,4,4,4,4,4,5,4,3,4,4,4,4,4,5,3,4,3,5,3,4,5,3,4,0,5,4,4,4,4,4,5,4,4,4,4,4,5,3,4,4,3,4,3,5,5,0,5,4,4,3,5,5,4,5,5,3,5,4,4,3,5,4,5,5,5,4,4,5,5,3,5,4,4,3,5,5,3,5,4,4,5,5,5,3,5,4,5,3,4,3,5,4,4,3,3,5,4,4,5,5,4,3,4,5,4,5,4,3,3,3,4,5,4,5,5,3,4,3,3,4,5,3,5,5,5,5,5,4,4,3,4,5,5,4,4,3,4,3,4,5,4,4,5,4,3,3,0,3,5,5,3,3,3,4,3,3,5,5,5,5,3,5,5,3,5,3,4,5,3,3,3,4,4,3,3,3,5,3,4,5,3,5,5,5,3,5,3,5,4,5,4,4,5,5,5,3,5,4,5,5,4,4,4,5,4,5,4,3,3,4,5,4,4,3,3,3,4,5,4,4,4,4,5,4,4,4,5,3,5,4,5,3,5,3,5,4,4,0,4,4,5,3,4,5,5,0,5,4,5,3,4,3,5,5,4,5,5,5,5,5,5,3,5,4,3,3,5,3,4,5,4,3,5,4,3,3,3,5,4,5,4,5,5,4,3,5,4,5,4,5,4,3,4,5,4,4,5,5,5,3,4,5,4,0,3,5,3,4,3,3,5,5,5,4,4,3,3,4,3,5,3,3,4,3,5,3,4,5,4,4,3,4,4,3,3,5,4,4,5,3,5,3,3,4,5,3,4,5,5,4,4,4,5,5,5,5,3,3,4,4,4,4,4,3,5,4,3,4,4,5,3,5,3,4,5,4,4,5,3,4,4,4,5,5,4,5,0,4,5,3,4,5,4,4,4,5,4,4,4,0,3,4,5,5,4,4,3,3,4,3,3,4,5,5,4,3,5,4,4,4,4,5,4,4,3,4,5,5,4,3,4,5,4,3,5,5,5,3,4,4,4,4,4,4,5,3,3,3,5,5,4,5,3,5,3,5,4,5,3,4,5,4,3,5,4,4,5,5,0,3,3,5,5,3,0,5,5,5,5,3,4,5,4,3,3,4,5,4,4,0,5,3,4,4,4,4,5,5,5,3,5,4,3,3,5,3,4,3,5,3,3,4,3,5,4,3,4,3,0,4,5,5,5,3,4,3,5,5,4,5,4,4,4,5,4,3,4,3,4,5,3,5,4,5,3,0,4,0,4,3,3,4,3,0,3,3,3,3,4,4,5,3,3,5,4,4,4,5,5,5,3,3,4,4,3,4,5,3,4,4,5,3,4,4,4,3,4,4,4,5,4,4,5,5,5,4,4,4,5,5,5,5,4,3,4,3,3,3,4,4,5,4,5,4,4,4,4,4,5,4,5,5,5,4,3,5,3,5,4,5,4,4,5,0,5,3,4,5,4,4,5,3,4,4,3,5,4,4,4,5,3,3,4,4,5,5,5,3,4,3,4,5,5,4,4,3,3,4,4,5,5,5,3,4,3,4,4,4,5,5,5,0,4,5,5,3,3,4,5,4,3,3,4,3,4,5,4,3,4,5,5,3,3,4,4,3,3,5,4,5,3,4,5,4,3,3,4,5,5,5,3,3,4,4,5,5,5,4,5,5,5,4,4,4,5,4,5,5,3,3,4,4,3,5,5,3,3,4,4,5,3,3,3};
         List<Integer> expectedClusterLabels = Arrays.stream(expectedIntClusterLabels).boxed().collect(Collectors.toList());
@@ -214,6 +276,57 @@ public class TestHdbscan {
     @Test
     public void testBasicTrainPredict() {
         runBasicTrainPredict(t);
+    }
+
+    @Test
+    public void deserializeHdbscanModelV42Test() {
+        String serializedModelFilename = "Hdbscan_minClSize7_L2_k7_nt1_v4.2.model";
+        String serializedModelPath = this.getClass().getClassLoader().getResource(serializedModelFilename).getPath();
+
+        HdbscanModel model = null;
+        try (ObjectInputStream oin = new ObjectInputStream(new FileInputStream(serializedModelPath))) {
+            Object data = oin.readObject();
+            model = (HdbscanModel) data;
+            if (!model.validate(ClusterID.class)) {
+                fail("This is not a Clustering model.");
+            }
+        } catch (IOException e) {
+            fail("There is a problem accessing the serialized model file " + serializedModelPath);
+        } catch (ClassNotFoundException e) {
+            fail("There is a problem deserializing the model file " + serializedModelPath);
+        }
+
+        // In v4.2 models this value is unset and defaults to negative infinity.
+        for (HdbscanTrainer.ClusterExemplar e : model.getClusterExemplars()) {
+            assertEquals(Double.NEGATIVE_INFINITY, e.getMaxDistToEdge());
+        }
+
+        ClusteringFactory clusteringFactory = new ClusteringFactory();
+        ResponseProcessor<ClusterID> emptyResponseProcessor = new EmptyResponseProcessor<>(clusteringFactory);
+        Map<String, FieldProcessor> regexMappingProcessors = new HashMap<>();
+        regexMappingProcessors.put("Feature1", new DoubleFieldProcessor("Feature1"));
+        regexMappingProcessors.put("Feature2", new DoubleFieldProcessor("Feature2"));
+        regexMappingProcessors.put("Feature3", new DoubleFieldProcessor("Feature3"));
+        RowProcessor<ClusterID> rowProcessor = new RowProcessor<>(emptyResponseProcessor,regexMappingProcessors);
+        CSVDataSource<ClusterID> csvTestSource = new CSVDataSource<>(Paths.get("src/test/resources/basic-gaussians-predict.csv"),rowProcessor,false);
+        Dataset<ClusterID> testSet = new MutableDataset<>(csvTestSource);
+
+        List<Prediction<ClusterID>> predictions = model.predict(testSet);
+
+        int i = 0;
+        int[] actualLabelPredictions = new int[testSet.size()];
+        double[] actualOutlierScorePredictions = new double[testSet.size()];
+        for (Prediction<ClusterID> pred : predictions) {
+            actualLabelPredictions[i] = pred.getOutput().getID();
+            actualOutlierScorePredictions[i] = pred.getOutput().getScore();
+            i++;
+        }
+
+        int[] expectedLabelPredictions = {5,3,5,5,3,5,4,4,5,3,3,3,3,4,4,5,4,5,5,4};
+        double[] expectedOutlierScorePredictions = {0.04384108680937504,0.04922915472735656,4.6591582469379667E-4,0.025225544503289288,0.04922915472735656,0.0,0.044397942146806146,0.044397942146806146,0.025225544503289288,0.0,0.04922915472735656,0.0,0.0,0.044397942146806146,0.02395925569434121,0.003121298369468062,0.02915273635987492,0.03422951971100352,0.0,0.02915273635987492};
+
+        assertArrayEquals(expectedLabelPredictions, actualLabelPredictions);
+        assertArrayEquals(expectedOutlierScorePredictions, actualOutlierScorePredictions);
     }
 
     public static void runEvaluation(HdbscanTrainer trainer) {

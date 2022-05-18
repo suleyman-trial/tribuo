@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021-2022, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package org.tribuo.clustering.hdbscan;
 
 import com.oracle.labs.mlrg.olcut.config.Config;
+import com.oracle.labs.mlrg.olcut.config.PropertyException;
 import com.oracle.labs.mlrg.olcut.provenance.Provenance;
 import com.oracle.labs.mlrg.olcut.util.MutableLong;
 import com.oracle.labs.mlrg.olcut.util.Pair;
@@ -26,9 +27,14 @@ import org.tribuo.ImmutableOutputInfo;
 import org.tribuo.Trainer;
 import org.tribuo.clustering.ClusterID;
 import org.tribuo.clustering.ImmutableClusteringInfo;
+import org.tribuo.math.distance.DistanceType;
 import org.tribuo.math.la.DenseVector;
 import org.tribuo.math.la.SGDVector;
 import org.tribuo.math.la.SparseVector;
+import org.tribuo.math.neighbour.NeighboursQuery;
+import org.tribuo.math.neighbour.NeighboursQueryFactory;
+import org.tribuo.math.neighbour.NeighboursQueryFactoryType;
+import org.tribuo.math.neighbour.bruteforce.NeighboursBruteForceFactory;
 import org.tribuo.provenance.ModelProvenance;
 import org.tribuo.provenance.TrainerProvenance;
 import org.tribuo.provenance.impl.TrainerProvenanceImpl;
@@ -46,14 +52,14 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 /**
  * An HDBSCAN* trainer which generates a hierarchical, density-based clustering representation
@@ -62,11 +68,18 @@ import java.util.logging.Logger;
  * The cluster assignments and outlier scores can be retrieved from the model after training. Outliers or noise
  * points are assigned the label 0.
  * <p>
- * See:
+ * For the HDBSCAN* algorithm see:
  * <pre>
  * R.J.G.B. Campello, D. Moulavi, A. Zimek and J. Sander "Hierarchical Density Estimates for Data Clustering,
  * Visualization, and Outlier Detection", ACM Trans. on Knowledge Discovery from Data, Vol 10, 1 (July 2015), 1-51.
  * <a href="http://lapad-web.icmc.usp.br/?portfolio_1=a-handful-of-experiments">HDBSCAN*</a>
+ * </pre>
+ * <p>
+ * For this specific implementation and prediction technique, see:
+ * <pre>
+ * G. Stewart, M. Al-Khassaweneh. "An Implementation of the HDBSCAN* Clustering Algorithm",
+ * Applied Sciences. 2022; 12(5):2405.
+ * <a href="https://doi.org/10.3390/app12052405">Manuscript</a>
  * </pre>
  */
 public final class HdbscanTrainer implements Trainer<ClusterID> {
@@ -74,36 +87,65 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
 
     static final int OUTLIER_NOISE_CLUSTER_LABEL = 0;
 
+    private static final double MAX_OUTLIER_SCORE = 0.9999;
+
     /**
      * Available distance functions.
+     * @deprecated
+     * This Enum is deprecated in version 4.3, replaced by {@link DistanceType}
      */
+    @Deprecated
     public enum Distance {
         /**
          * Euclidean (or l2) distance.
          */
-        EUCLIDEAN,
+        EUCLIDEAN(DistanceType.L2),
         /**
          * Cosine similarity as a distance measure.
          */
-        COSINE,
+        COSINE(DistanceType.COSINE),
         /**
          * L1 (or Manhattan) distance.
          */
-        L1
+        L1(DistanceType.L1);
+
+        private final DistanceType distanceType;
+
+        Distance(DistanceType distanceType) {
+            this.distanceType = distanceType;
+        }
+
+        /**
+         * Returns the {@link DistanceType} mapping for the enumeration's value.
+         *
+         * @return distanceType The {@link DistanceType} value.
+         */
+        public DistanceType getDistanceType() {
+            return distanceType;
+        }
     }
 
     @Config(mandatory = true, description = "The minimum number of points required to form a cluster.")
     private int minClusterSize;
 
-    @Config(mandatory = true, description = "The distance function to use.")
+    @Deprecated
+    @Config(description = "The distance function to use. This is now deprecated.")
     private Distance distanceType;
+
+    @Config(description = "The distance function to use.")
+    private DistanceType distType;
 
     @Config(mandatory = true, description = "The number of nearest-neighbors to use in the initial density approximation. " +
         "This includes the point itself.")
     private int k;
 
-    @Config(description = "The number of threads to use for training.")
+    @Deprecated
+    @Config(description = "The number of threads to use for training. This is now deprecated since it is a field on the " +
+        "NeighboursQueryFactory object.")
     private int numThreads = 1;
+
+    @Config(description = "The nearest neighbour implementation factory to use.")
+    private NeighboursQueryFactory neighboursQueryFactory;
 
     private int trainInvocationCounter;
 
@@ -117,26 +159,85 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
      * Constructs an HDBSCAN* trainer with only the minClusterSize parameter.
      *
      * @param minClusterSize The minimum number of points required to form a cluster.
-     * {@link #distanceType} defaults to {@link Distance#EUCLIDEAN}, {@link #k} defaults to {@link #minClusterSize},
-     * and {@link #numThreads} defaults to 1.
+     * {@link #distType} defaults to {@link DistanceType#L2}, {@link #k} defaults to {@link #minClusterSize},
+     * {@link #numThreads} defaults to 1 and {@link #neighboursQueryFactory} defaults to
+     * {@link NeighboursBruteForceFactory}.
      */
     public HdbscanTrainer(int minClusterSize) {
-        this(minClusterSize, Distance.EUCLIDEAN, minClusterSize, 1);
+        this(minClusterSize, DistanceType.L2, minClusterSize, 1, NeighboursQueryFactoryType.BRUTE_FORCE);
     }
 
     /**
-     * Constructs an HDBSCAN* trainer using the supplied parameters.
+     * Constructs an HDBSCAN* trainer using the supplied parameters. {@link #neighboursQueryFactory} defaults to
+     * {@link NeighboursBruteForceFactory}.
+     * @deprecated
+     * This Constructor is deprecated in version 4.3.
      *
      * @param minClusterSize The minimum number of points required to form a cluster.
      * @param distanceType The distance function.
      * @param k The number of nearest-neighbors to use in the initial density approximation.
      * @param numThreads The number of threads.
      */
+    @Deprecated
     public HdbscanTrainer(int minClusterSize, Distance distanceType, int k, int numThreads) {
+        this(minClusterSize, distanceType.getDistanceType(), k, numThreads, NeighboursQueryFactoryType.BRUTE_FORCE);
+    }
+
+    /**
+     * Constructs an HDBSCAN* trainer using the supplied parameters.
+     *
+     * @param minClusterSize The minimum number of points required to form a cluster.
+     * @param distType The distance function.
+     * @param k The number of nearest-neighbors to use in the initial density approximation.
+     * @param numThreads The number of threads.
+     * @param nqFactoryType The nearest neighbour query implementation factory to use.
+     */
+    public HdbscanTrainer(int minClusterSize, DistanceType distType, int k, int numThreads, NeighboursQueryFactoryType nqFactoryType) {
         this.minClusterSize = minClusterSize;
-        this.distanceType = distanceType;
+        this.distType = distType;
         this.k = k;
         this.numThreads = numThreads;
+        this.neighboursQueryFactory = NeighboursQueryFactoryType.getNeighboursQueryFactory(nqFactoryType, distType, numThreads);
+    }
+
+    /**
+     * Constructs an HDBSCAN* trainer using the supplied parameters.
+     *
+     * @param minClusterSize The minimum number of points required to form a cluster.
+     * @param k The number of nearest-neighbors to use in the initial density approximation.
+     * @param neighboursQueryFactory The nearest neighbour query implementation factory to use.
+     */
+    public HdbscanTrainer(int minClusterSize, int k, NeighboursQueryFactory neighboursQueryFactory) {
+        this.minClusterSize = minClusterSize;
+        this.distType = neighboursQueryFactory.getDistanceType();
+        this.k = k;
+        this.neighboursQueryFactory = neighboursQueryFactory;
+    }
+
+    /**
+     * Used by the OLCUT configuration system, and should not be called by external code.
+     */
+    @Override
+    public synchronized void postConfig() {
+        if (this.distanceType != null) {
+            if (this.distType != null) {
+                throw new PropertyException("distType", "Both distType and distanceType must not both be set.");
+            } else {
+                this.distType = this.distanceType.getDistanceType();
+                this.distanceType = null;
+            }
+        }
+
+        if (neighboursQueryFactory == null) {
+            int numberThreads = (this.numThreads <= 0) ? 1 : this.numThreads;
+            this.neighboursQueryFactory = new NeighboursBruteForceFactory(distType, numberThreads);
+        } else {
+            if (!this.distType.equals(neighboursQueryFactory.getDistanceType())) {
+                throw new PropertyException("neighboursQueryFactory", "distType and its field on the " +
+                    "NeighboursQueryFactory must be equal.");
+            }
+        }
+
     }
 
     @Override
@@ -160,8 +261,8 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
             n++;
         }
 
-        DenseVector coreDistances = calculateCoreDistances(data, k, distanceType, numThreads);
-        ExtendedMinimumSpanningTree emst = constructEMST(data, coreDistances, distanceType);
+        DenseVector coreDistances = calculateCoreDistances(data, k, neighboursQueryFactory);
+        ExtendedMinimumSpanningTree emst = constructEMST(data, coreDistances, distType);
 
         double[] pointNoiseLevels = new double[data.length];    // The levels at which each point becomes noise
         int[] pointLastClusters = new int[data.length];         // The last label of each point before becoming noise
@@ -181,7 +282,10 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
         ImmutableOutputInfo<ClusterID> outputMap = new ImmutableClusteringInfo(counts);
 
         // Compute the cluster exemplars.
-        List<ClusterExemplar> clusterExemplars = computeExemplars(data, clusterAssignments);
+        List<ClusterExemplar> clusterExemplars = computeExemplars(data, clusterAssignments, distType);
+
+        // Get the outlier score value for points that are predicted as noise points.
+        double noisePointsOutlierScore = getNoisePointsOutlierScore(clusterAssignments);
 
         logger.log(Level.INFO, "Hdbscan is done.");
 
@@ -189,7 +293,7 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
                 examples.getProvenance(), trainerProvenance, runProvenance);
 
         return new HdbscanModel("hdbscan-model", provenance, featureMap, outputMap, clusterLabels, outlierScoresVector,
-                                clusterExemplars, distanceType);
+                                clusterExemplars, distType, noisePointsOutlierScore);
     }
 
     @Override
@@ -216,69 +320,23 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
      *
      * @param data An array of {@link DenseVector} containing the data.
      * @param k The number of nearest-neighbors to use in these calculations.
-     * @param distanceType The distance metric to employ.
-     * @param numThreads  The number of threads to use for training.
+     * @param neighboursQueryFactory The nearest neighbour implementation factory.
      * @return A {@link DenseVector} containing the core distances for every point.
      */
-    private static DenseVector calculateCoreDistances(SGDVector[] data, int k, Distance distanceType, int numThreads) {
-        // The value of nearest-neighbors includes the point itself. The number of actual neighbors is one less.
-        int numNeighbors = k - 1;
+    private static DenseVector calculateCoreDistances(SGDVector[] data, int k, NeighboursQueryFactory neighboursQueryFactory) {
         DenseVector coreDistances = new DenseVector(data.length);
 
-        if (numNeighbors == 0) {
+        // A value of k=1 will not return any neighbouring points
+        if (k == 1) {
             return coreDistances;
         }
 
-        // When the number of threads is 1, the overhead of thread pools must be avoided
-        if (numThreads == 1) {
-            // This logic is duplicated in the CoreDistanceRunnable nested class below
-            for (int point = 0; point < data.length; point++) {
-                // Sorted nearest distances found so far
-                double[] kNNDistances = new double[numNeighbors];
-                Arrays.fill(kNNDistances, Double.MAX_VALUE);
-
-                for (int neighbor = 0; neighbor < data.length; neighbor++) {
-                    if (point == neighbor) {
-                        continue;
-                    }
-                    double distance = getDistance(data[point], data[neighbor], distanceType);
-
-                    // Check at which position in the nearest distances the current distance would fit.
-                    // k is typically small, but if cases with larger values of k become prevalent, this should be replaced
-                    // with a binary search
-                    int neighborIndex = numNeighbors;
-                    while (neighborIndex >= 1 && distance < kNNDistances[neighborIndex - 1]) {
-                        neighborIndex--;
-                    }
-
-                    // Shift elements in the array to make room for the current distance
-                    // The for loop could be written as an arraycopy, but the result is not particularly readable, and
-                    // numNeighbors is typically quite small
-                    if (neighborIndex < numNeighbors) {
-                        for (int shiftIndex = numNeighbors - 1; shiftIndex > neighborIndex; shiftIndex--) {
-                            kNNDistances[shiftIndex] = kNNDistances[shiftIndex - 1];
-                        }
-                        kNNDistances[neighborIndex] = distance;
-                    }
-                }
-                // The core distance for the point is the distance to the furthest away neighbor
-                coreDistances.set(point, kNNDistances[numNeighbors - 1]);
-            }
-        } else { // This makes the core distance calculations with multiple threads
-            ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
-            for (int point = 0; point < data.length; point++) {
-                executorService.execute(new CoreDistanceRunnable(data, numNeighbors, distanceType, point, coreDistances));
-            }
-            executorService.shutdown();
-            try {
-                boolean finished = executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
-                if (!finished) {
-                    throw new RuntimeException("Parallel execution failed");
-                }
-            } catch (InterruptedException e) {
-                throw new RuntimeException("Parallel execution failed", e);
-            }
+        NeighboursQuery nq = neighboursQueryFactory.createNeighboursQuery(data);
+        List<List<Pair<Integer, Double>>> indexDistancePairListOfLists = nq.queryAll(k);
+        for (int point = 0; point < data.length; point++) {
+            coreDistances.set(point, indexDistancePairListOfLists.get(point).get(k-1).getB());
         }
+
         return coreDistances;
     }
 
@@ -287,12 +345,12 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
      * core distances for each point.
      * @param data An array of {@link DenseVector} containing the data.
      * @param coreDistances A {@link DenseVector} containing the core distances for every point.
-     * @param distanceType The distance metric to employ.
+     * @param distType The distance metric to employ.
      * @return An {@link ExtendedMinimumSpanningTree} representation of the data using the mutual reachability distances,
      * and the graph is sorted by edge weight in ascending order.
      */
     private static ExtendedMinimumSpanningTree constructEMST(SGDVector[] data, DenseVector coreDistances,
-                                                            Distance distanceType) {
+                                                            DistanceType distType) {
         // One bit is set (true) for each attached point, and unset (false) for unattached points:
         BitSet attachedPoints = new BitSet(data.length);
 
@@ -320,7 +378,7 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
                     continue;
                 }
 
-                double mutualReachabilityDistance = getDistance(data[currentPoint], data[neighbor], distanceType);
+                double mutualReachabilityDistance = DistanceType.getDistance(data[currentPoint], data[neighbor], distType);
                 if (coreDistances.get(currentPoint) > mutualReachabilityDistance) {
                     mutualReachabilityDistance = coreDistances.get(currentPoint);
                 }
@@ -689,14 +747,16 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
     }
 
     /**
-     * Compute the exemplars. These are representative points which are subsets of their clusters and noise points, and
+     * Compute the exemplars. These are representative points which are subsets of their clusters, and
      * will be used for prediction on unseen data points.
      *
      * @param data An array of {@link DenseVector} containing the data.
      * @param clusterAssignments A map of the cluster labels, and the points assigned to them.
+     * @param distType The distance metric to employ.
      * @return A list of {@link ClusterExemplar}s which are used for predictions.
      */
-    private static List<ClusterExemplar> computeExemplars(SGDVector[] data, Map<Integer, List<Pair<Double, Integer>>> clusterAssignments) {
+    private static List<ClusterExemplar> computeExemplars(SGDVector[] data, Map<Integer, List<Pair<Double, Integer>>> clusterAssignments,
+                                                          DistanceType distType) {
         List<ClusterExemplar> clusterExemplars = new ArrayList<>();
         // The formula to calculate the exemplar number. This calculates the number of exemplars to be used for this
         // configuration. The appropriate number of exemplars is important for prediction. At the time, this
@@ -705,31 +765,43 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
 
         for (Entry<Integer, List<Pair<Double, Integer>>> e : clusterAssignments.entrySet()) {
             int clusterLabel = e.getKey();
-            List<Pair<Double, Integer>> outlierScoreIndexList = clusterAssignments.get(clusterLabel);
-
-            // Put the items into a TreeMap. This achieves the required sorting and removes duplicate outlier scores to
-            // provide the best samples
-            TreeMap<Double, Integer> outlierScoreIndexTree = new TreeMap<>();
-            outlierScoreIndexList.forEach(p -> outlierScoreIndexTree.put(p.getA(), p.getB()));
-            int numExemplarsThisCluster = e.getValue().size() * numExemplars / data.length;
-            if (numExemplarsThisCluster > outlierScoreIndexTree.size()) {
-                numExemplarsThisCluster = outlierScoreIndexTree.size();
-            }
 
             if (clusterLabel != OUTLIER_NOISE_CLUSTER_LABEL) {
-                for (int i = 0; i < numExemplarsThisCluster; i++) {
-                    // Note that for non-outliers, the first node is polled from the tree, which has the lowest outlier
-                    // score out of the remaining points assigned this cluster.
-                    Entry<Double, Integer> entry = outlierScoreIndexTree.pollFirstEntry();
-                    clusterExemplars.add(new ClusterExemplar(clusterLabel, entry.getKey(), data[entry.getValue()]));
+                List<Pair<Double, Integer>> outlierScoreIndexList = clusterAssignments.get(clusterLabel);
+
+                // Put the items into a TreeMap. This achieves the required sorting and removes duplicate outlier scores
+                // to provide the best samples.
+                TreeMap<Double, Integer> outlierScoreIndexTree = new TreeMap<>();
+                outlierScoreIndexList.forEach(p -> outlierScoreIndexTree.put(p.getA(), p.getB()));
+                int numExemplarsThisCluster = e.getValue().size() * numExemplars / data.length;
+                if (numExemplarsThisCluster == 0) {
+                    numExemplarsThisCluster = 1;
                 }
-            }
-            else {
-                for (int i = 0; i < numExemplarsThisCluster; i++) {
-                    // Note that for outliers the last node is polled from the tree, which has the highest outlier score
-                    // out of the remaining points assigned this cluster.
-                    Entry<Double, Integer> entry = outlierScoreIndexTree.pollLastEntry();
-                    clusterExemplars.add(new ClusterExemplar(clusterLabel, entry.getKey(), data[entry.getValue()]));
+                else if (numExemplarsThisCluster > outlierScoreIndexTree.size()) {
+                    numExemplarsThisCluster = outlierScoreIndexTree.size();
+                }
+
+                // First, get the entries that will be used for cluster exemplars.
+                // The first node is polled from the tree, which has the lowest outlier score out of the remaining
+                // points assigned this cluster.
+                List<Entry<Double, Integer>> partialClusterExemplars = new ArrayList<>();
+                Stream<Integer> intStream = IntStream.range(0, numExemplarsThisCluster).boxed();
+                intStream.forEach((i) -> partialClusterExemplars.add(outlierScoreIndexTree.pollFirstEntry()));
+
+                // For each of the partial exemplars in this cluster, iterate the remaining nodes in the tree to find
+                // the maximum distance between the exemplar and the members of the cluster. The other exemplars don't
+                // need to be checked here since they won't be on the fringe of the cluster.
+                for (Entry<Double, Integer> partialClusterExemplar : partialClusterExemplars) {
+                    SGDVector features = data[partialClusterExemplar.getValue()];
+                    double maxInnerDist = Double.NEGATIVE_INFINITY;
+                    for (Entry<Double, Integer> entry : outlierScoreIndexTree.entrySet()) {
+                        double distance = DistanceType.getDistance(features, data[entry.getValue()], distType);
+                        if (distance > maxInnerDist){
+                            maxInnerDist = distance;
+                        }
+                    }
+                    clusterExemplars.add(new ClusterExemplar(clusterLabel, partialClusterExemplar.getKey(), features,
+                                                             maxInnerDist));
                 }
             }
         }
@@ -737,34 +809,30 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
     }
 
     /**
-     * Calculates the distance between two vectors.
+     * Determine the outlier score value for points that are predicted as noise points.
      *
-     * @param vector1 A {@link SGDVector} representing a data point.
-     * @param vector2 A {@link SGDVector} representing a second data point.
-     * @param distanceType The distance metric to employ.
-     * @return A double representing the distance between the two points.
+     * @param clusterAssignments A map of the cluster labels, and the points assigned to them.
+     * @return An outlier score value for points predicted as noise points.
      */
-    private static double getDistance(SGDVector vector1, SGDVector vector2, Distance distanceType) {
-        double distance;
-        switch (distanceType) {
-            case EUCLIDEAN:
-                distance = vector1.euclideanDistance(vector2);
-                break;
-            case COSINE:
-                distance = vector1.cosineDistance(vector2);
-                break;
-            case L1:
-                distance = vector1.l1Distance(vector2);
-                break;
-            default:
-                throw new IllegalStateException("Unknown distance " + distanceType);
+    private static double getNoisePointsOutlierScore(Map<Integer, List<Pair<Double, Integer>>> clusterAssignments) {
+
+        List<Pair<Double, Integer>> outlierScoreIndexList = clusterAssignments.get(OUTLIER_NOISE_CLUSTER_LABEL);
+        if ((outlierScoreIndexList == null) || outlierScoreIndexList.isEmpty()) {
+            return MAX_OUTLIER_SCORE;
         }
-        return distance;
+
+        double upperOutlierScoreBound = Double.NEGATIVE_INFINITY;
+        for (Pair<Double, Integer> outlierScoreIndex : outlierScoreIndexList) {
+            if (outlierScoreIndex.getA() > upperOutlierScoreBound) {
+                upperOutlierScoreBound = outlierScoreIndex.getA();
+            }
+        }
+        return upperOutlierScoreBound;
     }
 
     @Override
     public String toString() {
-        return "HdbscanTrainer(minClusterSize=" + minClusterSize + ",distanceType=" + distanceType + ",k=" + k + ",numThreads=" + numThreads + ")";
+        return "HdbscanTrainer(minClusterSize=" + minClusterSize + ",distanceType=" + distType + ",k=" + k + ",numThreads=" + numThreads + ")";
     }
 
     @Override
@@ -775,84 +843,86 @@ public final class HdbscanTrainer implements Trainer<ClusterID> {
     /**
      * A cluster exemplar, with attributes for the point's label, outlier score and its features.
      */
-    final static class ClusterExemplar implements Serializable {
+    public final static class ClusterExemplar implements Serializable {
         private static final long serialVersionUID = 1L;
 
         private final Integer label;
         private final Double outlierScore;
         private final SGDVector features;
+        private final Double maxDistToEdge;
 
-        ClusterExemplar(Integer label, Double outlierScore, SGDVector features) {
+        ClusterExemplar(Integer label, Double outlierScore, SGDVector features, Double maxDistToEdge) {
             this.label = label;
             this.outlierScore = outlierScore;
             this.features = features;
+            this.maxDistToEdge = maxDistToEdge;
         }
 
-        Integer getLabel() {
+        /**
+         * Get the label in this exemplar.
+         * @return The label.
+         */
+        public Integer getLabel() {
             return label;
         }
 
-        Double getOutlierScore() {
+        /**
+         * Get the outlier score in this exemplar.
+         * @return The outlier score.
+         */
+        public Double getOutlierScore() {
             return outlierScore;
         }
 
-        SGDVector getFeatures() {
+        /**
+         * Get the feature vector in this exemplar.
+         * @return The feature vector.
+         */
+        public SGDVector getFeatures() {
             return features;
         }
-    }
 
-    /**
-     * A Runnable implementation of the core distance calculation for parallelization.
-     * To be used with an {@link ExecutorService}
-     */
-    private final static class CoreDistanceRunnable implements Runnable {
+        /**
+         * Get the maximum distance from this exemplar to the edge of the cluster.
+         * <p>
+         * For models trained in 4.2 this will return {@link Double#NEGATIVE_INFINITY} as that information is 
+         * not produced by 4.2 models.
+         * @return The distance to the edge of the cluster.
+         */
+        public Double getMaxDistToEdge() {
+            if (maxDistToEdge != null) {
+                return maxDistToEdge;
+            }
+            else {
+                return Double.NEGATIVE_INFINITY;
+            }
+        }
 
-        final private SGDVector[] data;
-        final private int numNeighbors;
-        final private Distance distanceType;
-        final private int point;
-        final DenseVector coreDistances;
-
-        CoreDistanceRunnable(SGDVector[] data, int numNeighbors, Distance distanceType, int point, DenseVector coreDistances) {
-            this.data = data;
-            this.numNeighbors = numNeighbors;
-            this.distanceType = distanceType;
-            this.point = point;
-            this.coreDistances = coreDistances;
+        /**
+         * Copies this cluster exemplar.
+         * @return A deep copy of this cluster exemplar.
+         */
+        public ClusterExemplar copy() {
+            return new ClusterExemplar(label,outlierScore,features.copy(),maxDistToEdge);
         }
 
         @Override
-        public void run() {
-            // This logic is duplicated in the calculateCoreDistances method in the outer class above
-            double[] kNNDistances = new double[numNeighbors];
-            Arrays.fill(kNNDistances, Double.MAX_VALUE);
+        public String toString() {
+            double dist = maxDistToEdge == null ? Double.NEGATIVE_INFINITY : maxDistToEdge;
+            return "ClusterExemplar(label="+label+",outlierScore="+outlierScore+",vector="+features+",maxDistToEdge="+dist+")";
+        }
 
-            for (int neighbor = 0; neighbor < data.length; neighbor++) {
-                if (point == neighbor) {
-                    continue;
-                }
-                double distance = getDistance(data[point], data[neighbor], distanceType);
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ClusterExemplar that = (ClusterExemplar) o;
+            return label.equals(that.label) && outlierScore.equals(that.outlierScore) && features.equals(that.features) && Objects.equals(maxDistToEdge, that.maxDistToEdge);
+        }
 
-                // Check at which position in the nearest distances the current distance would fit
-                // k is typically small, but if cases with larger values of k become prevalent, this should be replaced
-                // with a binary search
-                int neighborIndex = numNeighbors;
-                while (neighborIndex >= 1 && distance < kNNDistances[neighborIndex-1]) {
-                    neighborIndex--;
-                }
-
-                // Shift elements in the array to make room for the current distance
-                // The for loop could be written as an arraycopy, but the result is not particularly readable, and
-                // numNeighbors is typically quite small
-                if (neighborIndex < numNeighbors) {
-                    for (int shiftIndex = numNeighbors-1; shiftIndex > neighborIndex; shiftIndex--) {
-                        kNNDistances[shiftIndex] = kNNDistances[shiftIndex-1];
-                    }
-                    kNNDistances[neighborIndex] = distance;
-                }
-            }
-            // The core distance for the point is the distance to the furthest away neighbor
-            coreDistances.set(point, kNNDistances[numNeighbors-1]);
+        @Override
+        public int hashCode() {
+            return Objects.hash(label, outlierScore, features, maxDistToEdge);
         }
     }
     

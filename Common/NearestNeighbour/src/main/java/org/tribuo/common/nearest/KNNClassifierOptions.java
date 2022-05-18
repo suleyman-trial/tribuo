@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015-2022, Oracle and/or its affiliates. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ import org.tribuo.classification.ensemble.VotingCombiner;
 import org.tribuo.common.nearest.KNNModel.Backend;
 import org.tribuo.common.nearest.KNNTrainer.Distance;
 import org.tribuo.ensemble.EnsembleCombiner;
+import org.tribuo.math.distance.DistanceType;
+import org.tribuo.math.neighbour.NeighboursQueryFactoryType;
 
 /**
  * CLI Options for training a k-nearest neighbour predictor.
@@ -56,10 +58,11 @@ public class KNNClassifierOptions implements ClassificationOptions<KNNTrainer<La
     @Option(longName = "knn-num-threads", usage = "Number of threads to use.")
     public int knnNumThreads = 1;
     /**
-     * Distance metric to use. Defaults to L2.
+     * Distance metric to use. Defaults to L2 (EUCLIDEAN).
      */
-    @Option(longName = "knn-distance", usage = "Distance metric to use.")
-    public Distance knnDistance = Distance.L2;
+    @Option(longName = "knn-distance-type", usage = "Distance metric to use.")
+    public DistanceType distType = DistanceType.L2;
+
     /**
      * Parallel backend to use.
      */
@@ -70,6 +73,11 @@ public class KNNClassifierOptions implements ClassificationOptions<KNNTrainer<La
      */
     @Option(longName = "knn-voting", usage = "Parallel backend to use.")
     public EnsembleCombinerType knnEnsembleCombiner = EnsembleCombinerType.VOTING;
+    /**
+     * The nearest neighbour implementation factory to use. Defaults to {@link NeighboursQueryFactoryType#BRUTE_FORCE}.
+     */
+    @Option(longName = "knn-neighbour-query-factory-type", usage = "The nearest neighbour implementation factory to use.")
+    public NeighboursQueryFactoryType nqFactoryType = NeighboursQueryFactoryType.BRUTE_FORCE;
 
     @Override
     public String getOptionsDescription() {
@@ -89,6 +97,6 @@ public class KNNClassifierOptions implements ClassificationOptions<KNNTrainer<La
 
     @Override
     public KNNTrainer<Label> getTrainer() {
-        return new KNNTrainer<>(knnK, knnDistance, knnNumThreads, getEnsembleCombiner(), knnBackend);
+        return new KNNTrainer<>(knnK, distType, knnNumThreads, getEnsembleCombiner(), knnBackend, nqFactoryType);
     }
 }
