@@ -30,6 +30,8 @@ jobs:
         with:
           distribution: 'adopt'
           java-version: '8'
+      - name: Workflow Telemetry
+        uses: thundra-io/workflow-telemetry-action@v1.0.0
       - name: Thundra Maven Test Instrumentation
         uses: thundra-io/thundra-maven-test-action@v1
         env:
